@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# MATLAB
+*.asv
+
+# Simulation outputs
+*.raw
+*.out
+*.log
+psf/
+results/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Machine-specific config
+machine.env
