@@ -64,8 +64,8 @@ def get_config(corner="tt", coarse=True):
     c['VGS'] = np.arange(0, c['VGS_max'] + c['VGS_step'] / 2, c['VGS_step'])
     c['VDS'] = np.arange(0, c['VDS_max'] + c['VDS_step'] / 2, c['VDS_step'])
     c['VSB'] = np.arange(0, c['VSB_max'] + c['VSB_step'] / 2, c['VSB_step'])
-    c['WIDTH'] = 5
-    c['NFING'] = 2
+    c['WIDTH'] = 5   # um per finger, used in the netlist (w=)
+    c['NFING'] = 2   # finger count (m=)
 
     # 19 output variables. Stored into .h5 (float32). Names are self-explanatory:
     # FT = fT (transit frequency), GM_ID = gm/id, GAIN = gm/gds (intrinsic gain).

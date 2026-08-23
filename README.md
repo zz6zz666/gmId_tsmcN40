@@ -24,20 +24,20 @@ TSMC N40 (CRN40LP) PDK 的 1.1V 核心 MOS 器件（nch / pch，BSIM4）gm/ID �
 
 | 参数       | 值                                                          |
 | ---------- | ----------------------------------------------------------- |
-| 参考宽度 W | 5 µm / 指，NFING=2（总参考宽度 10 µm）                      |
+| 参考宽度 W | 10 µm                                                    |
 | VGS        | 0 ~ 1.1 V，步长 0.02 → 56 点                                |
 | VDS        | 0 ~ 1.1 V，步长 0.02 → 56 点                                |
 | VSB        | 0 ~ 0.8 V，步长 0.1 → 9 点                                |
 | L          | 0.04 ~ 5 µm → 48 点（0.04~0.14 步 0.01；0.16~0.50 步 0.02；0.55~1.0 步 0.05；1.2,1.4,1.6,1.8,2,2.5,3,4,5） |
-| 单变量网格 | 9 × 56 × 56 × 48 = 1,354,752 点                             |
+| 单变量网格 | 48 × 56 × 56 × 9（(L, VGS, VDS, VSB)）= 1,354,752 点        |
 
 每文件 21 个变量（19 DC + 2 噪声），共 10 文件（nch/pch × tt/ff/ss/fs/sf）。
 
 ## 存储格式（.h5，HDF5）
 
 - 每文件 = 器件+工艺角，如 `nch_tt.h5`、`pch_tt.h5`。
-- 4-D 数据数组 `(VSB, VDS, VGS, L)`，**float32 + gzip(level 6) + shuffle**，
-  chunk = 一个 L 的整片 `(VSB, VDS, VGS, 1)`。
+- 4-D 数据数组 `(L, VGS, VDS, VSB)`，
+  **float32 + gzip(level 6) + shuffle**，chunk = 一个 L 的整片 `(1, VGS, VDS, VSB)`。
 - 元数据存为标量/字符串数据集：`CORNER DEVICE INFO TEMP W NFING`。
 - 坐标轴存为 1-D 数据集：`L VGS VDS VSB`。
 - 变量名：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS FT GM_ID GAIN VDSAT`（+ 噪声 `STH SFL`）。
@@ -122,12 +122,12 @@ gm_id = lookup(nch, 'GM_ID', 'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)     # �
 VGS   = lookupVGS(nch, 'GM_ID', 15, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)          # 反查 VGS
 wt    = lookup(nch, 'GM_CGG', 'GM_ID', [5, 10, 15], 'VDS', 0.7, 'VSB', 0, 'L', 0.1)  # 交叉查表
 
-nch.GM_ID                                # 直接取 4-D 数组 (VSB,VDS,VGS,L)
+nch.GM_ID                                # 直接取 4-D 数组 (L,VGS,VDS,VSB)
 nch.GM / nch.CGG                         # 任意比例量现算（= GM_CGG）
 ```
 
 - `loadmat` 返回 `LookupTable`，变量名为属性（`ID GM FT GM_ID ...`），4-D 数组
-  `(VSB, VDS, VGS, L)`，VSB 已按升序重排。
+  `(L, VGS, VDS, VSB)`（与官方 .mat 布局一致；也可直接加载官方 `.mat` 文件）。
 - `lookup(data, outvar, ...)`：`outvar` 可为存储变量或比例量（`GM_ID`、`ID_W`、`GM_CGG` 等，
   由原始量现算），支持 4-D 插值、交叉查表；`lookupVGS(...)` 按 gm/id 或电流密度反查 VGS。
 - pch 文件用正电压域（|VSG|、|VSD|）查询，与 nch 一致。
@@ -139,14 +139,14 @@ HDF5 可直接用 Mathematica `Import` 读取。见 `mathematica/tsmcN40_lookup.
 ```mathematica
 << "mathematica/tsmcN40_lookup.wl"
 data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
-f = N40Interpolant[data, "GM_ID"];      (* 4-D 插值函数，坐标 (VSB,VDS,VGS,L) *)
-f[0.0, 0.7, 0.6, 0.1]                   (* 该偏置点的 gm/id *)
+f = N40Interpolant[data, "GM_ID"];      (* 4-D 插值函数，坐标 (L,VGS,VDS,VSB) *)
+f[0.1, 0.6, 0.7, 0.0]                   (* L=0.1um, VGS=0.6V, VDS=0.7V, VSB=0 的 gm/id *)
 data["GM"]/data["CGG"];                 (* 任意比例量 *)
 ```
 
-- 4-D 数组 `(VSB, VDS, VGS, L)` 可直接用 `data["GM_ID"]` 取出；
-  `ListInterpolation[arr, {VSB, VDS, VGS, L}]` 构造插值（脚本已封装）。
-- 验证：`wolframscript -script mathematica/test_lookup.wl`（读取真实 .h5，
+- 4-D 数组 `(L, VGS, VDS, VSB)` 可直接用 `data["GM_ID"]` 取出；
+  `ListInterpolation[arr, {L, VGS, VDS, VSB}]` 构造插值（脚本已封装）。
+- 验证：`wolframscript -script mathematica/xtract_demo.wl`（读取真实 .h5，
   打印与 Python `lookup` 一致的插值结果）。
 
 ## 备注

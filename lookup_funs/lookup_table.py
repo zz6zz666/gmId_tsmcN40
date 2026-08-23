@@ -1,8 +1,12 @@
 """
 Python equivalent of Murmann's Matlab lookup.m and lookupVGS.m
-for gm/ID lookup tables (HDF5 .h5).
+for gm/ID lookup tables (HDF5 .h5 or MAT .mat files).
+
+The 4-D variable arrays follow the official Murmann lookup-table layout
+(L, VGS, VDS, VSB) — the same order used by techsweep_spectre_run.m.
 """
 
+import os
 import numpy as np
 from scipy.interpolate import interpn, PchipInterpolator, interp1d
 import h5py
@@ -10,23 +14,20 @@ import h5py
 
 class LookupTable:
     """
-    Container for a single MOSFET lookup table loaded from a MAT v7.3 file.
+    Container for a single MOSFET lookup table loaded from a MAT (.mat)
+    or HDF5 (.h5) file.
     """
 
     def __init__(self, filepath):
-        with h5py.File(filepath, "r") as f:
-            for key in f.keys():
-                val = f[key]
-                if isinstance(val, h5py.Dataset):
-                    arr = np.array(val)
-                    if arr.dtype == object:
-                        s = arr[()]
-                        if isinstance(s, bytes):
-                            s = s.decode("utf-8")
-                        setattr(self, key, s)
-                    else:
-                        arr = np.atleast_1d(arr).squeeze()
-                        setattr(self, key, arr)
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".h5", ".hdf5"):
+            data = self._read_h5(filepath)
+        elif ext == ".mat":
+            data = self._read_mat(filepath)
+        else:
+            raise ValueError(
+                f"Unsupported lookup-table format '{ext}' (expected .mat or .h5)."
+            )
 
         # Normalise shape: vectors -> 1-D, scalars -> Python scalar
         for attr in ["VSB", "VGS", "VDS", "L"]:
@@ -47,9 +48,52 @@ class LookupTable:
             if isinstance(val, np.ndarray) and val.ndim == 4:
                 self._vars[key] = val
 
-        # Axes must match the dimension order of the 4-D arrays:
-        # (VSB, VDS, VGS, L)
-        self._axes = (self.VSB, self.VDS, self.VGS, self.L)
+        # Axes must match the dimension order of the 4-D arrays.
+        # The official Murmann lookup-table layout is (L, VGS, VDS, VSB),
+        # matching the data files produced by techsweep_spectre_run.m.
+        self._axes = (self.L, self.VGS, self.VDS, self.VSB)
+
+    # ------------------------------------------------------------------
+    # file readers
+    # ------------------------------------------------------------------
+    def _read_h5(self, filepath):
+        with h5py.File(filepath, "r") as f:
+            for key in f.keys():
+                val = f[key]
+                if isinstance(val, h5py.Dataset):
+                    arr = np.array(val)
+                    if arr.dtype == object:
+                        s = arr[()]
+                        if isinstance(s, bytes):
+                            s = s.decode("utf-8")
+                        setattr(self, key, s)
+                    else:
+                        arr = np.atleast_1d(arr).squeeze()
+                        setattr(self, key, arr)
+
+    def _read_mat(self, filepath):
+        """Read a MATLAB v5 (.mat) lookup table.
+
+        Variable arrays are stored in the official (L, VGS, VDS, VSB) order.
+        """
+        import scipy.io
+
+        m = scipy.io.loadmat(filepath, squeeze_me=True, struct_as_record=False)
+        key = next(k for k in m if not k.startswith("__"))
+        s = m[key]
+        for name in dir(s):
+            if name.startswith("_"):
+                continue
+            val = getattr(s, name)
+            if isinstance(val, str):
+                setattr(self, name, val)
+            elif isinstance(val, np.ndarray):
+                if val.dtype.kind in "SUO":
+                    setattr(self, name, str(np.asarray(val).item()))
+                else:
+                    setattr(self, name, np.atleast_1d(val).squeeze())
+            elif np.isscalar(val):
+                setattr(self, name, val)
 
     def _get_single(self, name):
         """Return a raw 4-D array by name, or None."""
@@ -260,7 +304,7 @@ def lookup(data, outvar, *args, **kwargs):
     # Mode 1 & 2: direct multidimensional interpolation
     # ------------------------------------------------------------------
     elif len(non_coord_keys) == 0:
-        axes_names = ["VSB", "VDS", "VGS", "L"]
+        axes_names = ["L", "VGS", "VDS", "VSB"]
         query_points = []
         for ax_name in axes_names:
             if ax_name in params:
@@ -380,8 +424,9 @@ def lookupVGS(data, *args, **kwargs):
             return np.full_like(target_val, np.nan)
 
         # Vectorised interpolation over the search sweep
+        # (L, VGS, VDS, VSB) axis order
         xi = np.column_stack(
-            [vsb_search, vds_search, vgs_search, np.full_like(vgs_search, l)]
+            [np.full_like(vgs_search, l), vgs_search, vds_search, vsb_search]
         )
         y_search = interpn(
             data._axes,
@@ -499,5 +544,5 @@ def lookupVGS(data, *args, **kwargs):
 
 
 def loadmat(filepath):
-    """Convenience wrapper: load a MAT v7.3 lookup table."""
+    """Convenience wrapper: load a MAT (.mat) or HDF5 (.h5) lookup table."""
     return LookupTable(filepath)

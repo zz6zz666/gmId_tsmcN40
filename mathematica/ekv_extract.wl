@@ -1,21 +1,15 @@
-(*
+(*)
   ekv_extract.wl
-  Mathematica port of lookup_funs/ekv_extract.py — EKV parameter extraction
-  (Murmann, "Systematic Design of Analog CMOS Circuits", Appendix A.1).
+  Mathematica port of the two core EKV extraction functions.
 
-  Requires tsmcN40_lookup.wl (LoadTsmcN40 / N40Interpolant) to be loaded.
-
-  XTRACT[data, L, VDS, VSB, rho, TEMP]   extract from a lookup table
-  XTRACT2[VGS, ID, rho, TEMP]            extract from a raw ID(VGS) curve
+  Requires tsmcN40_lookup.wl to be loaded.
 *)
 
-ClearAll[XTRACT, XTRACT2, NPGradient];
+ClearAll[XTRACT, XTRACT2, NPGradient, ekvCore];
 
-kB = 1.380649*^-23;   (* Boltzmann constant  [J/K] *)
-qe = 1.602176634*^-19; (* elementary charge   [C] *)
+kB = 1.380649*^-23;
+qe = 1.602176634*^-19;
 
-(* Numeric gradient matching numpy.gradient (non-uniform spacing).
-   Interior: central difference; edges: forward/backward difference. *)
 NPGradient[y_List, x_List] := Module[{n = Length[x], h},
   h = Differences[x];
   Table[
@@ -26,7 +20,6 @@ NPGradient[y_List, x_List] := Module[{n = Length[x], h},
     {i, n}]
 ];
 
-(* Core: given sorted, finite (vgs, gm_id, jd), return {n, VT, JS}. *)
 ekvCore[vgs_List, gmId_List, jd_List, rho_, UT_] := Module[
   {idxMax, M, n, gmIdRef, gmSide, vgSide, u, gmInc, vgInc, vgsO, jdO,
    qo, vpO, vt, io, js},
@@ -35,16 +28,16 @@ ekvCore[vgs_List, gmId_List, jd_List, rho_, UT_] := Module[
   If[M <= 0 || !NumberQ[M], Indeterminate,
     n = 1/(M*UT);
     gmIdRef = rho*M;
-    (* right side of the peak, reversed so gm_id is increasing *)
     gmSide = Reverse[gmId[[idxMax ;;]]];
     vgSide = Reverse[vgs[[idxMax ;;]]];
     u = DeleteDuplicatesBy[Transpose[{gmSide, vgSide}], #[[1]] &];
     gmInc = u[[All, 1]]; vgInc = u[[All, 2]];
     If[Length[gmInc] < 2 || gmIdRef < Min[gmInc] || gmIdRef > Max[gmInc],
       Indeterminate,
-      vgsO = Interpolation[Transpose[{gmInc, vgInc}], InterpolationOrder -> 1][gmIdRef];
+       (* Cubic interpolation keeps JS(VDS) smooth across VGS grid nodes. *)
+       vgsO = Interpolation[Transpose[{gmInc, vgInc}], InterpolationOrder -> 3][gmIdRef];
       If[!NumberQ[vgsO], Indeterminate,
-        jdO = Interpolation[Transpose[{vgs, jd}], InterpolationOrder -> 1][vgsO];
+         jdO = Interpolation[Transpose[{vgs, jd}], InterpolationOrder -> 3][vgsO];
         If[!NumberQ[jdO] || jdO <= 0, Indeterminate,
           qo = 1/rho - 1;
           vpO = UT*(2*(qo - 1) + Log[qo]);
@@ -58,80 +51,89 @@ ekvCore[vgs_List, gmId_List, jd_List, rho_, UT_] := Module[
   ]
 ];
 
-(*
-  XTRACT[data, L, VDS, VSB, rho, TEMP]
-  Scalar VDS -> {VDS, n, VT, JS, dn/dVDS, dVT/dVDS, dlogJS/dVDS,
-                 d2n/dVDS2, d2VT/dVDS2, d2logJS/dVDS2}
-  Vector VDS -> matrix with one row per VDS value.
-*)
 XTRACT[data_Association, L_?NumericQ, VDS_, VSB_?NumericQ,
-       rho_ : 0.6, TEMP_ : 300.0] := Module[
-  {UT, vdsList, fid, fgmid, rows, nVec, vtVec, jsVec, vdsVec, derivs},
+  rho_ : 0.6, TEMP_ : 300.0] := Module[
+  {UT, vdsList, vdsGrid, fid, fgmid, rows, validRows, vdsVec, nVec, vtVec,
+   jsVec, vdsVec1, vdsVec2, d1n, d1vt, d1js, d2n, d2vt, d2js, interp,
+   eval, out},
   UT = kB*TEMP/qe;
   fid = N40Interpolant[data, "ID"];
   fgmid = N40Interpolant[data, "GM_ID"];
   vdsList = Flatten[{VDS}];
+  vdsGrid = Rest[data["VDS"]];
   rows = Table[
     Module[{vgs, jd, gmid, sel, core},
       vgs = data["VGS"];
-      jd = Map[fid[VSB, vds, #, L] &, vgs]/data["W"];
-      gmid = Map[fgmid[VSB, vds, #, L] &, vgs];
+      jd = Map[fid[L, #, vds, VSB] &, vgs]/data["W"];
+      gmid = Map[fgmid[L, #, vds, VSB] &, vgs];
       sel = Select[Transpose[{vgs, jd, gmid}],
         NumberQ[#[[2]]] && NumberQ[#[[3]]] &];
       core = If[sel == {}, Indeterminate,
         ekvCore[sel[[All, 1]], sel[[All, 3]], sel[[All, 2]], rho, UT]];
       If[core === Indeterminate,
         {vds, Indeterminate, Indeterminate, Indeterminate},
-        {vds, core[[1]], core[[2]], core[[3]]}
-      ]
+        {vds, core[[1]], core[[2]], core[[3]]}]
     ],
-    {vds, vdsList}];
-
-  If[Length[rows] == 1, Join[rows[[1]], ConstantArray[0., 6]],
-    Module[{ln, lvt, ljs},
-      vdsVec = rows[[All, 1]];
-      nVec = rows[[All, 2]];
-      vtVec = rows[[All, 3]];
-      jsVec = rows[[All, 4]];
-      If[MemberQ[rows[[All, 2 ;;]], Indeterminate, Infinity],
-        Join[rows, ConstantArray[Indeterminate, {Length[rows], 6}], 2],
-        ln = NPGradient[nVec, vdsVec];
-        lvt = NPGradient[vtVec, vdsVec];
-        ljs = NPGradient[Log[jsVec], vdsVec];
-        derivs = Join[
-          Transpose[{ln, lvt, ljs}],
-          Transpose[{NPGradient[ln, vdsVec], NPGradient[lvt, vdsVec],
-                     NPGradient[ljs, vdsVec]}], 2];
-        Join[rows, derivs, 2]
-      ]
-    ]
+    {vds, vdsGrid}];
+  validRows = Select[rows,
+    And @@ (NumberQ /@ #[[2 ;; 4]]) && #[[4]] > 0 &];
+  If[Length[validRows] < 4,
+    out = ConstantArray[Indeterminate, {Length[vdsList], 10}];
+    out[[All, 1]] = vdsList;
+    If[Length[vdsList] == 1, First[out], out],
+    vdsVec = validRows[[All, 1]];
+    nVec = validRows[[All, 2]];
+    vtVec = validRows[[All, 3]];
+    jsVec = validRows[[All, 4]];
+    vdsVec1 = MovingAverage[vdsVec, 2];
+    vdsVec2 = MovingAverage[vdsVec1, 2];
+    d1n = Differences[nVec]/Differences[vdsVec];
+    d1vt = Differences[vtVec]/Differences[vdsVec];
+    d1js = Differences[Log[jsVec]]/Differences[vdsVec];
+    d2n = Differences[d1n]/Differences[vdsVec1];
+    d2vt = Differences[d1vt]/Differences[vdsVec1];
+    d2js = Differences[d1js]/Differences[vdsVec1];
+    interp[x_, y_] := Interpolation[Transpose[{x, y}], InterpolationOrder -> 3];
+    eval[x_, y_, z_] := interp[x, y][Clip[z, {First[x], Last[x]}]];
+    out = Join[
+      Transpose[{eval[vdsVec, nVec, #] & /@ vdsList,
+        eval[vdsVec, vtVec, #] & /@ vdsList,
+        eval[vdsVec, jsVec, #] & /@ vdsList}],
+      Transpose[{eval[vdsVec1, d1n, #] & /@ vdsList,
+        eval[vdsVec1, d1vt, #] & /@ vdsList,
+        eval[vdsVec1, d1js, #] & /@ vdsList,
+        eval[vdsVec2, d2n, #] & /@ vdsList,
+        eval[vdsVec2, d2vt, #] & /@ vdsList,
+        eval[vdsVec2, d2js, #] & /@ vdsList}], 2];
+    out = Join[Transpose[{vdsList}], out, 2];
+    If[Length[vdsList] == 1, First[out], out]
   ]
 ];
 
-(*
-  XTRACT2[VGS, ID, rho, TEMP]
-  ID may be a 1-D curve or a 2-D matrix (each column one curve).
-  Returns {n, VT, IS} for a single curve, or a matrix (rows per curve).
-*)
 XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0] := Module[
   {UT, idMat, ncols, out},
   UT = kB*TEMP/qe;
-  idMat = If[MatrixQ[ID],
-    If[Length[ID] == Length[VGS], ID, Transpose[ID]],
-    {ID}];
-  ncols = Length[idMat];
+  idMat = Which[
+    VectorQ[ID], List /@ ID,
+    MatrixQ[ID] && Length[ID] == Length[VGS], ID,
+    MatrixQ[ID] && Length[First[ID]] == Length[VGS], Transpose[ID],
+    True, Return[$Failed]
+  ];
+  ncols = Dimensions[idMat][[2]];
   out = Table[
     Module[{vgs, idv, valid, gmId, core},
       vgs = VGS;
       idv = idMat[[All, c]];
       valid = Select[Transpose[{vgs, idv}],
         NumberQ[#[[2]]] && #[[2]] > 0 &];
-      If[Length[valid] < 3, {Indeterminate, Indeterminate, Indeterminate},
+      If[Length[valid] < 3,
+        {Indeterminate, Indeterminate, Indeterminate},
         vgs = valid[[All, 1]];
         idv = valid[[All, 2]];
         gmId = NPGradient[Log[idv], vgs];
         core = ekvCore[vgs, gmId, idv, rho, UT];
-        If[core === Indeterminate, {Indeterminate, Indeterminate, Indeterminate}, core]
+        If[core === Indeterminate,
+          {Indeterminate, Indeterminate, Indeterminate}, core]
       ]
     ],
     {c, ncols}];

@@ -17,6 +17,59 @@ import numpy as np
 import matplotlib.pyplot as plt
 from lookup_table import loadmat, lookup
 from ekv_extract import XTRACT
+from scipy.optimize import brentq
+
+
+def invq(x):
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    out = np.empty_like(x)
+    for i, xx in enumerate(x):
+        out[i] = brentq(
+            lambda q: 2.0 * (q - 1.0) + np.log(q) - float(xx), 1e-12, 80.0
+        )
+    return float(out[0]) if out.size == 1 else out
+
+
+def EKV_params(dev, L, VDS, VSB=0.0, rho=0.6, TEMP=300.0):
+    return XTRACT(dev, L, VDS, VSB, rho=rho, TEMP=TEMP)
+
+
+def _param_matrix(dev, L, VDS, VSB, rho, TEMP):
+    return np.atleast_2d(XTRACT(dev, L, VDS, VSB, rho=rho, TEMP=TEMP))
+
+
+def ekv_idvds(dev, L, VDS, VGS, VSB=0.0, rho=0.6, TEMP=300.0):
+    UT = 1.380649e-23 * TEMP / 1.602176634e-19
+    y = _param_matrix(dev, L, VDS, VSB, rho, TEMP)
+    n, VT, JS = y[:, 1], y[:, 2], y[:, 3]
+    qS = invq(((float(VGS) - VT) / n) / UT)
+    ID = dev.W * JS * (qS**2 + qS)
+    return ID, qS, y
+
+
+def ekv_gds(dev, L, VDS, VGS, VSB=0.0, rho=0.6, TEMP=300.0):
+    UT = 1.380649e-23 * TEMP / 1.602176634e-19
+    y = _param_matrix(dev, L, VDS, VSB, rho, TEMP)
+    if y.shape[0] < 2:
+        raise ValueError("ekv_gds requires a VDS vector of at least two points.")
+    SVT, SIS = y[:, 5], y[:, 6]
+    ID, qS, _ = ekv_idvds(dev, L, VDS, VGS, VSB=VSB, rho=rho, TEMP=TEMP)
+    gm = dev.W * y[:, 3] / (y[:, 1] * UT) * qS
+    x = (float(VGS) - y[:, 2]) / y[:, 1] / UT
+    return -gm * (SVT + x * y[:, 4]) + ID * SIS
+
+
+def ekv_aint(dev, L, VDS, VGS, VSB=0.0, rho=0.6, TEMP=300.0):
+    UT = 1.380649e-23 * TEMP / 1.602176634e-19
+    y = _param_matrix(dev, L, VDS, VSB, rho, TEMP)
+    if y.shape[0] < 2:
+        raise ValueError("ekv_aint requires a VDS vector of at least two points.")
+    SVT, SIS = y[:, 5], y[:, 6]
+    n = y[:, 1]
+    qS = invq(((float(VGS) - y[:, 2]) / n) / UT)
+    gmid = 1.0 / (n * UT * (1.0 + qS))
+    x = ((float(VGS) - y[:, 2]) / n) / UT
+    return 1.0 / (SIS / gmid - SVT - x * y[:, 4])
 
 # ------------------------------------------------------------------
 # Load lookup table (adjust path to your installation if necessary)
@@ -140,4 +193,52 @@ ax.axhline(0, color='k', ls='-', lw=0.5)
 ax.grid(True, ls='--', alpha=0.4)
 
 plt.tight_layout()
+
+vds_vec = nch.VDS[nch.VDS >= 0.3]
+id_ekv, q_s, params = ekv_idvds(nch, L, vds_vec, 0.4, VSB=VSB, rho=rho, TEMP=TEMP)
+id_lut = np.array([lookup(nch, 'ID', 'VGS', 0.4, 'VDS', vd, 'VSB', VSB,
+                          'L', L, WARNING='off') for vd in vds_vec])
+gds_ekv = ekv_gds(nch, L, vds_vec, 0.4, VSB=VSB, rho=rho, TEMP=TEMP)
+gds_lut = np.array([lookup(nch, 'GDS', 'VGS', 0.4, 'VDS', vd, 'VSB', VSB,
+                            'L', L, WARNING='off') for vd in vds_vec])
+
+fig2, axes2 = plt.subplots(1, 2, figsize=(11, 4.5))
+axes2[0].plot(vds_vec, id_lut * 1e6, 'b-', label='Lookup')
+axes2[0].plot(vds_vec, id_ekv * 1e6, 'r--', label='EKV')
+axes2[0].set(xlabel='VDS (V)', ylabel='ID (uA)', title='ID vs VDS')
+axes2[0].legend(); axes2[0].grid(True, ls='--', alpha=0.4)
+axes2[1].plot(vds_vec, gds_lut * 1e6, 'b-', label='Lookup')
+axes2[1].plot(vds_vec, gds_ekv * 1e6, 'r--', label='EKV')
+axes2[1].set(xlabel='VDS (V)', ylabel='gds (uS)', title='gds vs VDS')
+axes2[1].legend(); axes2[1].grid(True, ls='--', alpha=0.4)
+fig2.tight_layout()
+
+vds_der = nch.VDS[(nch.VDS >= 0.5) & (nch.VDS <= 0.7)]
+der = EKV_params(nch, L, vds_der, VSB, rho=rho, TEMP=TEMP)
+i_der = np.argmin(np.abs(vds_der - 0.6))
+n_der, vt_der = der[i_der, 1], der[i_der, 2]
+dn_der, svt, sis = der[i_der, 4], der[i_der, 5], der[i_der, 6]
+gmid_lut = np.asarray(lookup(nch, 'GM_ID', 'VGS', nch.VGS, 'VDS', 0.6,
+                             'VSB', VSB, 'L', L, WARNING='off')).flatten()
+gds_id_lut = np.asarray(lookup(nch, 'GDS', 'VGS', nch.VGS, 'VDS', 0.6,
+                               'VSB', VSB, 'L', L, WARNING='off')).flatten() / np.asarray(
+    lookup(nch, 'ID', 'VGS', nch.VGS, 'VDS', 0.6, 'VSB', VSB, 'L', L,
+           WARNING='off')).flatten()
+gain_lut = np.asarray(lookup(nch, 'GAIN', 'VGS', nch.VGS, 'VDS', 0.6,
+                             'VSB', VSB, 'L', L, WARNING='off')).flatten()
+q_gain = np.maximum(1.0 / (n_der * UT * gmid_lut) - 1.0, np.finfo(float).tiny)
+x_gain = 2.0 * (q_gain - 1.0) + np.log(q_gain)
+gds_id_ekv = -gmid_lut * (svt + x_gain * dn_der) + sis
+gain_ekv = 1.0 / (sis / gmid_lut - svt - x_gain * dn_der)
+
+fig3, axes3 = plt.subplots(1, 2, figsize=(11, 4.5))
+axes3[0].plot(gmid_lut, gds_id_lut, 'b-', label='Lookup')
+axes3[0].plot(gmid_lut, gds_id_ekv, 'r--', label='EKV')
+axes3[0].set(xlabel='gm/ID (S/A)', ylabel='gds/ID (1/V)', title='gds/ID vs gm/ID')
+axes3[0].legend(); axes3[0].grid(True, ls='--', alpha=0.4)
+axes3[1].semilogy(gmid_lut, gain_lut, 'b-', label='Lookup')
+axes3[1].semilogy(gmid_lut, gain_ekv, 'r--', label='EKV')
+axes3[1].set(xlabel='gm/ID (S/A)', ylabel='Intrinsic gain', title='Intrinsic gain')
+axes3[1].legend(); axes3[1].grid(True, ls='--', alpha=0.4)
+fig3.tight_layout()
 plt.show()

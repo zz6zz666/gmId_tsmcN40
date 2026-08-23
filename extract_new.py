@@ -5,8 +5,9 @@ Produces .h5 lookup tables.
 
 Storage format:
   - HDF5 container, one file per device+corner (e.g. nch_tt.h5)
-  - 4-D variable arrays (VSB, VDS, VGS, L) stored as float32 with gzip
-    compression + chunking (per-VSB chunks, one L per L-slice)
+  - 4-D variable arrays (L, VGS, VDS, VSB) stored as float32 with gzip
+    compression + chunking (per-L chunks).  Axis order matches the official
+    Murmann lookup table layout (L, VGS, VDS, VSB).
   - metadata as scalar/string datasets: CORNER, DEVICE, INFO, TEMP, W, NFING
   - axes as 1-D datasets: L, VGS, VDS, VSB
   - variables: ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS
@@ -37,7 +38,7 @@ def save_mat(filename, data_dict):
             else:
                 arr = np.asarray(v)
                 if arr.ndim >= 4:
-                    chunks = arr.shape[:3] + (1,)
+                    chunks = (1,) + arr.shape[1:]   # one chunk per L slice
                     f.create_dataset(k, data=arr, dtype=np.float32, chunks=chunks,
                                      compression='gzip', compression_opts=6,
                                      shuffle=True)
@@ -124,16 +125,17 @@ def make_mat_data(c, L_arr, device):
     nVSB = len(c['VSB'])
     d = {
         'INFO': c['modelinfo'], 'CORNER': c['corner'], 'DEVICE': device,
-        'TEMP': c['temp'], 'NFING': c['NFING'], 'W': c['WIDTH'],
+        'TEMP': c['temp'], 'NFING': c['NFING'],
+        'W': c['WIDTH'] * c['NFING'],   # total width of the reference device
         'L': np.asarray(L_arr),
         'VGS': np.asarray(c['VGS']),
         'VDS': np.asarray(c['VDS']),
         'VSB': np.asarray(c['VSB']),
     }
     for v in c['outvars']:
-        d[v] = np.zeros((nVSB, nVDS, nVGS, nL), dtype=np.float32)
+        d[v] = np.zeros((nL, nVGS, nVDS, nVSB), dtype=np.float32)
     for v in c['outvars_noise']:
-        d[v] = np.full((nVSB, nVDS, nVGS, nL), np.nan, dtype=np.float32)
+        d[v] = np.full((nL, nVGS, nVDS, nVSB), np.nan, dtype=np.float32)
     return d
 
 
@@ -190,10 +192,10 @@ def extract_corner(corner, fine, outdir, l_range, voltage, srcdir=None):
         for ii in range(l_start, l_end):
             lval = all_L[ii]
 
-            buf_n = {v: np.zeros((nVSB, nVDS, nVGS), dtype=np.float32) for v in c['outvars']}
-            buf_p = {v: np.zeros((nVSB, nVDS, nVGS), dtype=np.float32) for v in c['outvars']}
-            buf_n_noise = {v: np.full((nVSB, nVDS, nVGS), np.nan, dtype=np.float32) for v in c['outvars_noise']}
-            buf_p_noise = {v: np.full((nVSB, nVDS, nVGS), np.nan, dtype=np.float32) for v in c['outvars_noise']}
+            buf_n = {v: np.zeros((nVGS, nVDS, nVSB), dtype=np.float32) for v in c['outvars']}
+            buf_p = {v: np.zeros((nVGS, nVDS, nVSB), dtype=np.float32) for v in c['outvars']}
+            buf_n_noise = {v: np.full((nVGS, nVDS, nVSB), np.nan, dtype=np.float32) for v in c['outvars_noise']}
+            buf_p_noise = {v: np.full((nVGS, nVDS, nVSB), np.nan, dtype=np.float32) for v in c['outvars_noise']}
 
             for j in range(nVSB):
                 raw_dir = '%s/L%03d_%.3fum_VSB%03d_%+.2fV.raw' % (
@@ -210,15 +212,15 @@ def extract_corner(corner, fine, outdir, l_range, voltage, srcdir=None):
 
                 if lval in idx_n:
                     for vname, vals in dc_n.items():
-                        buf_n[vname][j, :, :] = vals
+                        buf_n[vname][:, :, j] = np.asarray(vals).T
                     for vname, vals in noise_n.items():
-                        buf_n_noise[vname][j, :, :] = vals
+                        buf_n_noise[vname][:, :, j] = np.asarray(vals).T
 
                 if lval in idx_p:
                     for vname, vals in dc_p.items():
-                        buf_p[vname][j, :, :] = vals
+                        buf_p[vname][:, :, j] = np.asarray(vals).T
                     for vname, vals in noise_p.items():
-                        buf_p_noise[vname][j, :, :] = vals
+                        buf_p_noise[vname][:, :, j] = np.asarray(vals).T
 
                 processed += 1
                 print(' [%s] L=%.3fum VSB=%+.2fV ... OK (%.1fs)' %
@@ -228,16 +230,16 @@ def extract_corner(corner, fine, outdir, l_range, voltage, srcdir=None):
             if lval in idx_n:
                 in_n = idx_n[lval]
                 for vname in c['outvars']:
-                    f_n[vname][:, :, :, in_n] = buf_n[vname]
+                    f_n[vname][in_n, :, :, :] = buf_n[vname]
                 for vname in c['outvars_noise']:
-                    f_n[vname][:, :, :, in_n] = buf_n_noise[vname]
+                    f_n[vname][in_n, :, :, :] = buf_n_noise[vname]
 
             if lval in idx_p:
                 ip = idx_p[lval]
                 for vname in c['outvars']:
-                    f_p[vname][:, :, :, ip] = buf_p[vname]
+                    f_p[vname][ip, :, :, :] = buf_p[vname]
                 for vname in c['outvars_noise']:
-                    f_p[vname][:, :, :, ip] = buf_p_noise[vname]
+                    f_p[vname][ip, :, :, :] = buf_p_noise[vname]
 
     t_total = time.time() - t0
     print('  [%s] %d combos in %.0fs' % (corner, processed, t_total))
@@ -262,8 +264,8 @@ def _verify(fname, l_start, l_end, all_L, idx_map, nVSB):
                 if lval not in idx_map:
                     continue
                 idx = idx_map[lval]
-                a = id_data[0, :, :, idx].sum()
-                b = id_data[nVSB - 1, :, :, idx].sum()
+                a = id_data[idx, :, :, 0].sum()
+                b = id_data[idx, :, :, nVSB - 1].sum()
                 if abs(a) < 1e-20 and abs(b) < 1e-20:
                     print('  WARN: L=%.3fum has near-zero ID' % lval)
                     return False

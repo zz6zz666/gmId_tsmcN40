@@ -18,7 +18,7 @@ D:\tsmcN40_lookup\
 └── pch_ss.h5
 ```
 
-正常设计使用 `tt` corner。所有查表值都以**参考宽度归一化**：W = 5 µm/指 × 2 指（总 10 µm）。
+正常设计使用 `tt` corner。所有查表值都以**参考宽度归一化**：元数据 W = 10 µm。
 
 ## 2. 工艺参数概览（fine 模式）
 
@@ -31,8 +31,8 @@ D:\tsmcN40_lookup\
 | VDS 范围       | 0 ~ 1.1 V，步长 0.02 V（56 点）                 |
 | VSB 范围       | 0 ~ 0.8 V，步长 0.1 V（9 点）        |
 | L 范围         | 0.04 ~ 5 µm（48 点），详细值见下方               |
-| 仿真宽度 W     | 5 µm/指 × 2 指（总 10 µm）                       |
-| 单变量网格     | 9 × 56 × 56 × 48 = 1,354,752 点                  |
+| 仿真宽度 W     | 10 µm                                        |
+| 单变量网格     | 48 × 56 × 56 × 9（(L, VGS, VDS, VSB)）= 1,354,752 点 |
 
 **L 详细值（48 点）**：
 
@@ -43,7 +43,7 @@ D:\tsmcN40_lookup\
 
 ## 3. 数据结构
 
-- 4-D 数据数组 `(VSB, VDS, VGS, L)`，float32 + gzip 压缩。
+- 4-D 数据数组 `(L, VGS, VDS, VSB)`（与官方 Murmann 查找表布局一致），float32 + gzip 压缩。
 - 变量：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS FT GM_ID GAIN VDSAT`，外加噪声 `STH SFL`。
 - 元数据数据集：`CORNER DEVICE INFO TEMP W NFING`。
 - 坐标轴数据集：`L VGS VDS VSB`。
@@ -79,8 +79,8 @@ HDF5 可直接用 Mathematica `Import` 读取。见项目 `mathematica/tsmcN40_l
 << "mathematica/tsmcN40_lookup.wl";
 data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
 f = N40Interpolant[data, "GM_ID"];
-f[0.0, 0.7, 0.6, 0.1]              (* 4-D 插值查表 (VSB,VDS,VGS,L) *)
-cur = SliceVGS[data, "GM_ID", 0.0, 0.7, 0.1];   (* 固定 (VSB,VDS,L) 扫 VGS *)
+f[0.1, 0.6, 0.7, 0.0]              (* 4-D 插值查表 (L,VGS,VDS,VSB) *)
+cur = SliceVGS[data, "GM_ID", 0.1, 0.7, 0.0];   (* 固定 (L,VDS,VSB) 扫 VGS *)
 ```
 
 也可直接取数组后用 `ListInterpolation` 自建插值。

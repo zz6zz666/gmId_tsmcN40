@@ -5,6 +5,7 @@ Python equivalents of Murmann's Matlab XTRACT.m and XTRACT2.m
 
 import numpy as np
 from lookup_table import lookup
+from scipy.interpolate import PchipInterpolator
 
 
 def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
@@ -47,15 +48,20 @@ def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
     qe = 1.602176634e-19   # Elementary charge   [C]
     UT = k * TEMP / qe     # Thermal voltage     [V]
 
-    VDS = np.atleast_1d(VDS).flatten()
+    vds_query = np.atleast_1d(VDS).flatten().astype(float)
     L = float(L)
     VSB = float(VSB)
 
     # ------------------------------------------------------------------
-    # 1) Extract n, VT, JS for every VDS
+    # 1) Extract n, VT, JS on an independent grid.  Derivatives are
+    #    evaluated on half-grid points below, matching pygmid's XTRACT.
     # ------------------------------------------------------------------
+    vds_grid = np.asarray(dev.VDS, dtype=float).flatten()
+    if len(vds_grid) < 3:
+        raise ValueError("XTRACT requires at least three VDS grid points.")
+    vds_grid = vds_grid[1:]
     results = []
-    for vds in VDS:
+    for vds in vds_grid:
         vgs = dev.VGS.copy()
         # Ensure monotonically increasing for safe interpolation
         sort_idx = np.argsort(vgs)
@@ -121,14 +127,15 @@ def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
         if gm_id_ref < gm_id_inc[0] or gm_id_ref > gm_id_inc[-1]:
             VGS_o = np.nan
         else:
-            VGS_o = float(np.interp(gm_id_ref, gm_id_inc, vgs_inc))
+            # Smooth interpolation avoids slope jumps when VGS_o crosses a LUT node.
+            VGS_o = float(PchipInterpolator(gm_id_inc, vgs_inc)(gm_id_ref))
 
         if not np.isfinite(VGS_o):
             results.append([vds, np.nan, np.nan, np.nan])
             continue
 
         # Drain-current density at the reference point
-        JD_o = float(np.interp(VGS_o, vgs, jd))
+        JD_o = float(PchipInterpolator(vgs, jd)(VGS_o))
         if not np.isfinite(JD_o) or JD_o <= 0:
             results.append([vds, np.nan, np.nan, np.nan])
             continue
@@ -152,45 +159,50 @@ def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
 
     results = np.array(results, dtype=float)
 
-    # ------------------------------------------------------------------
-    # 2) Numerical derivatives w.r.t. VDS
-    # ------------------------------------------------------------------
-    N = results.shape[0]
-    derivs = np.zeros((N, 6), dtype=float)
+    valid_rows = np.isfinite(results[:, 1:4]).all(axis=1) & (results[:, 3] > 0)
+    if np.sum(valid_rows) < 4:
+        out = np.full((len(vds_query), 10), np.nan)
+        out[:, 0] = vds_query
+        return out[0] if out.shape[0] == 1 else out
 
-    if N > 1:
-        vds_vec = results[:, 0]
-        n_vec = results[:, 1]
-        VT_vec = results[:, 2]
-        # Guard against non-positive JS before taking log
-        JS_vec = results[:, 3]
-        logJS_vec = np.log(JS_vec)
+    fit_vds = results[valid_rows, 0]
+    n_vec, VT_vec, JS_vec = results[valid_rows, 1:].T
+    fit_vds1 = 0.5 * (fit_vds[:-1] + fit_vds[1:])
+    fit_vds2 = 0.5 * (fit_vds1[:-1] + fit_vds1[1:])
+    d1n = np.diff(n_vec) / np.diff(fit_vds)
+    d1VT = np.diff(VT_vec) / np.diff(fit_vds)
+    d1logJS = np.diff(np.log(JS_vec)) / np.diff(fit_vds)
+    d2n = np.diff(d1n) / np.diff(fit_vds1)
+    d2VT = np.diff(d1VT) / np.diff(fit_vds1)
+    d2logJS = np.diff(d1logJS) / np.diff(fit_vds1)
 
-        # First derivatives (np.gradient handles non-uniform spacing)
-        dn = np.gradient(n_vec, vds_vec)
-        dVT = np.gradient(VT_vec, vds_vec)
-        dlogJS = np.gradient(logJS_vec, vds_vec)
-
-        # Second derivatives
-        d2n = np.gradient(dn, vds_vec)
-        d2VT = np.gradient(dVT, vds_vec)
-        d2logJS = np.gradient(dlogJS, vds_vec)
-
-        derivs = np.column_stack([dn, dVT, dlogJS, d2n, d2VT, d2logJS])
-
-    out = np.concatenate([results, derivs], axis=1)
+    # PCHIP on the parameter grid and on the half-grid derivatives avoids
+    # endpoint artifacts when the caller requests a VDS subrange.
+    interp = lambda x, y, z: PchipInterpolator(x, y)(
+        np.clip(z, x[0], x[-1])
+    )
+    n_q = interp(fit_vds, n_vec, vds_query)
+    VT_q = interp(fit_vds, VT_vec, vds_query)
+    JS_q = interp(fit_vds, JS_vec, vds_query)
+    derivs = np.column_stack([
+        interp(fit_vds1, d1n, vds_query),
+        interp(fit_vds1, d1VT, vds_query),
+        interp(fit_vds1, d1logJS, vds_query),
+        interp(fit_vds2, d2n, vds_query),
+        interp(fit_vds2, d2VT, vds_query),
+        interp(fit_vds2, d2logJS, vds_query),
+    ])
+    out = np.column_stack([vds_query, n_q, VT_q, JS_q, derivs])
     if out.shape[0] == 1:
         return out.flatten()
     return out
-
-
-def XTRACT2(VGS, ID, rho=0.6):
+def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0):
     """
     Extract basic EKV parameters from directly-supplied I_D(V_GS) data.
 
     Syntax (Matlab-compatible) ::
 
-        p = XTRACT2(VGS, ID, rho=0.6)
+        p = XTRACT2(VGS, ID, rho=0.6, TEMP=300.0)
 
     Parameters
     ----------
@@ -233,7 +245,6 @@ def XTRACT2(VGS, ID, rho=0.6):
 
     k = 1.380649e-23
     qe = 1.602176634e-19
-    TEMP = 300.0
     UT = k * TEMP / qe
 
     out = []
@@ -288,13 +299,13 @@ def XTRACT2(VGS, ID, rho=0.6):
         if gm_id_ref < gm_id_inc[0] or gm_id_ref > gm_id_inc[-1]:
             VGS_o = np.nan
         else:
-            VGS_o = float(np.interp(gm_id_ref, gm_id_inc, vgs_inc))
+            VGS_o = float(PchipInterpolator(gm_id_inc, vgs_inc)(gm_id_ref))
 
         if not np.isfinite(VGS_o):
             out.append([np.nan, np.nan, np.nan])
             continue
 
-        ID_o = float(np.interp(VGS_o, vgs, id_vec))
+        ID_o = float(PchipInterpolator(vgs, id_vec)(VGS_o))
         if not np.isfinite(ID_o) or ID_o <= 0:
             out.append([np.nan, np.nan, np.nan])
             continue
