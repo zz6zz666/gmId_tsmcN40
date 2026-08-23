@@ -135,6 +135,8 @@ class LookupTable:
 
 def _parse_params(args, kwargs):
     """Convert Matlab-style key-value pairs into a dict."""
+    if len(args) % 2:
+        raise ValueError("Arguments must be supplied as name-value pairs.")
     params = {}
     i = 0
     while i < len(args):
@@ -205,12 +207,18 @@ def lookup(data, outvar, *args, **kwargs):
     # ------------------------------------------------------------------
     if len(non_coord_keys) == 1:
         in_ratio = non_coord_keys[0]
+        if "_" not in outvar or "_" not in in_ratio:
+            raise ValueError(
+                "Invalid syntax or usage mode: cross-lookup requires both "
+                "the output and input variables to be ratios."
+            )
         in_values = params.pop(in_ratio)
         out_ratio = outvar
 
         vsb = np.atleast_1d(params.pop("VSB", default_params["VSB"])).flatten()
         vds = np.atleast_1d(params.pop("VDS", default_params["VDS"])).flatten()
         l = np.atleast_1d(params.pop("L", default_params["L"])).flatten()
+        vgs_full = np.atleast_1d(params.pop("VGS", data.VGS)).flatten()
 
         if params:
             raise ValueError(
@@ -223,8 +231,6 @@ def lookup(data, outvar, *args, **kwargs):
 
         in_values_arr = np.atleast_1d(in_values).flatten()
         result = np.empty((*coord_shape, *in_values_arr.shape), dtype=float)
-
-        vgs_full = data.VGS
 
         for idx in np.ndindex(coord_shape):
             vsb_i = float(vsb_grid[idx])
@@ -376,14 +382,21 @@ def lookupVGS(data, *args, **kwargs):
     method = params.pop("METHOD", np.array(["pchip"])).flatten()
     method = str(method[0]).lower() if len(method) > 0 else "pchip"
 
-    l = float(params.pop("L", np.array([np.min(data.L)]))[0])
+    l_values = np.atleast_1d(
+        params.pop("L", np.array([np.min(data.L)]))
+    ).astype(float).flatten()
 
     # ------------------------------------------------------------------
     # Mode 2: unknown source (VDB / VGB supplied)
     # ------------------------------------------------------------------
     if "VDB" in params or "VGB" in params:
+        if "VDB" not in params or "VGB" not in params:
+            raise ValueError("lookupVGS mode 2 requires both 'VDB' and 'VGB'")
         vdb = float(params.pop("VDB")[0])
         vgb = float(params.pop("VGB")[0])
+        if len(l_values) != 1:
+            raise ValueError("lookupVGS mode 2 requires scalar 'L'")
+        l = float(l_values[0])
 
         target_key = None
         target_val = None
@@ -469,6 +482,8 @@ def lookupVGS(data, *args, **kwargs):
             )
 
         result = np.squeeze(interp(target_val))
+        if target_key == "GM_ID" and np.any(np.isnan(result)):
+            print("lookupVGS: GM_ID input larger than maximum!")
         if isinstance(result, np.ndarray) and result.ndim == 0:
             result = result.item()
         return result
@@ -477,8 +492,12 @@ def lookupVGS(data, *args, **kwargs):
     # Mode 1: known source terminal
     # ------------------------------------------------------------------
     else:
-        vds = float(params.pop("VDS", np.array([np.max(data.VDS) / 2.0]))[0])
-        vsb = float(params.pop("VSB", np.array([0.0]))[0])
+        vds_values = np.atleast_1d(
+            params.pop("VDS", np.array([np.max(data.VDS) / 2.0]))
+        ).astype(float).flatten()
+        vsb_values = np.atleast_1d(
+            params.pop("VSB", np.array([0.0]))
+        ).astype(float).flatten()
 
         target_key = None
         target_val = None
@@ -496,48 +515,49 @@ def lookupVGS(data, *args, **kwargs):
             )
 
         target_val = np.atleast_1d(target_val).flatten()
-
-        # Evaluate the target ratio along the entire VGS sweep
-        vgs_full = data.VGS
-        y_search = lookup(
-            data, target_key, "VGS", vgs_full, "VDS", vds, "VSB", vsb, "L", l,
-            WARNING="off",
+        vector_count = sum(
+            len(v) > 1 for v in (target_val, l_values, vds_values, vsb_values)
         )
-        y_search = np.asarray(y_search).flatten()
+        if vector_count > 1:
+            raise ValueError("lookupVGS accepts at most one vector input.")
 
-        # Remove NaN / inf
-        valid = np.isfinite(y_search)
-        vgs_full = vgs_full[valid]
-        y_search = y_search[valid]
+        biases = np.array(
+            np.meshgrid(l_values, vds_values, vsb_values, indexing="ij")
+        ).reshape(3, -1).T
+        rows = []
+        for l, vds, vsb in biases:
+            vgs_full = data.VGS.copy()
+            y_search = np.asarray(
+                lookup(
+                    data, target_key, "VGS", vgs_full, "VDS", vds,
+                    "VSB", vsb, "L", l, WARNING="off",
+                )
+            ).flatten()
+            valid = np.isfinite(y_search)
+            x = y_search[valid]
+            y = vgs_full[valid]
+            if len(x) < 2:
+                rows.append(np.full_like(target_val, np.nan, dtype=float))
+                continue
+            if target_key == "GM_ID":
+                idx_max = np.argmax(x)
+                x, y = x[idx_max:], y[idx_max:]
+            x, uniq_idx = np.unique(x, return_index=True)
+            y = y[uniq_idx]
+            if len(x) < 2:
+                rows.append(np.full_like(target_val, np.nan, dtype=float))
+                continue
+            if method == "pchip":
+                interp = PchipInterpolator(x, y, extrapolate=False)
+            else:
+                interp = interp1d(
+                    x, y, kind=method, bounds_error=False, fill_value=np.nan
+                )
+            rows.append(np.asarray(interp(target_val), dtype=float))
 
-        if len(y_search) < 2:
-            return np.full_like(target_val, np.nan)
-
-        # Non-monotonicity handling
-        if target_key == "GM_ID":
-            idx_max = np.argmax(y_search)
-            y_search = y_search[idx_max:]
-            vgs_full = vgs_full[idx_max:]
-        elif target_key in ("GM_CGG", "GM_CGS"):
-            idx_max = np.argmax(y_search)
-            y_search = y_search[: idx_max + 1]
-            vgs_full = vgs_full[: idx_max + 1]
-
-        if len(y_search) < 2:
-            return np.full_like(target_val, np.nan)
-
-        # Remove duplicate y values
-        y_search, uniq_idx = np.unique(y_search, return_index=True)
-        vgs_full = vgs_full[uniq_idx]
-
-        if method == "pchip":
-            interp = PchipInterpolator(y_search, vgs_full)
-        else:
-            interp = interp1d(
-                y_search, vgs_full, kind=method, bounds_error=False, fill_value=np.nan
-            )
-
-        result = np.squeeze(interp(target_val))
+        result = np.squeeze(np.asarray(rows))
+        if target_key == "GM_ID" and np.any(np.isnan(result)):
+            print("lookupVGS: GM_ID input larger than maximum!")
         if isinstance(result, np.ndarray) and result.ndim == 0:
             result = result.item()
         return result

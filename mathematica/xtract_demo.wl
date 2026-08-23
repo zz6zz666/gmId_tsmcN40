@@ -42,8 +42,8 @@ q = 10.^Subdivide[-3, 1, 199];
 VGSekv = n*UT*(2 (q - 1) + Log[q]) + VT;
 JDekv = (q^2 + q)*JS;
 gmIDekv = 1/(n*UT (1 + q));
-JDLut = Map[N40Interpolant[nch, "ID"][L, #, VDS, VSB] &, vgs]/nch["W"];
-gmIDLut = Map[N40Interpolant[nch, "GM_ID"][L, #, VDS, VSB] &, vgs];
+JDLut = lookup[nch, "ID_W", "L", L, "VGS", vgs, "VDS", VDS, "VSB", VSB];
+gmIDLut = lookup[nch, "GM_ID", "L", L, "VGS", vgs, "VDS", VDS, "VSB", VSB];
 ref = rho*Max[gmIDLut];
 VGSr = Interpolation[Transpose[{Reverse[gmIDekv], Reverse[VGSekv]}],
    InterpolationOrder -> 1][ref];
@@ -77,7 +77,7 @@ With[{yy = XTRACT[nch, L, vdsVec, VSB, rho]},
   nV = yy[[All, 2]]; vtV = yy[[All, 3]]; jsV = yy[[All, 4]];
   qV = invq[((0.4 - vtV)/nV)/UT];
   idEkv = nch["W"]*jsV*(qV^2 + qV);
-  idLut = Map[N40Interpolant[nch, "ID"][L, 0.4, #, VSB] &, vdsVec];
+  idLut = lookup[nch, "ID", "L", L, "VGS", 0.4, "VDS", vdsVec, "VSB", VSB];
   ListLinePlot[{Transpose[{vdsVec, idLut*1.*^6}], Transpose[{vdsVec, idEkv*1.*^6}]},
    PlotStyle -> {Blue, {Red, Dashed}}, PlotLegends -> {"Lookup", "EKV"},
    AxesLabel -> {"VDS (V)", "ID (uA)"}, GridLines -> Automatic]
@@ -92,7 +92,7 @@ With[{yy = XTRACT[nch, L, vdsVec, VSB, rho]},
   qV = invq[xV];
   gdsEkv = -nch["W"]*jsV/(nV*UT)*qV*(yy[[All, 6]] + xV*yy[[All, 5]]) +
     nch["W"]*jsV*(qV^2 + qV)*yy[[All, 7]];
-  gdsLut = Map[N40Interpolant[nch, "GDS"][L, 0.4, #, VSB] &, vdsVec];
+  gdsLut = lookup[nch, "GDS", "L", L, "VGS", 0.4, "VDS", vdsVec, "VSB", VSB];
   ListLinePlot[{Transpose[{vdsVec, gdsLut*1.*^6}], Transpose[{vdsVec, gdsEkv*1.*^6}]},
    PlotStyle -> {Blue, {Red, Dashed}}, PlotLegends -> {"Lookup", "EKV"},
    AxesLabel -> {"VDS (V)", "gds (uS)"}, GridLines -> Automatic]
@@ -104,10 +104,10 @@ With[{yy = XTRACT[nch, L, vdsVec, VSB, rho]},
 With[{yy = XTRACT[nch, L, Select[nch["VDS"], .5 <= # <= .7 &], VSB, rho]},
   j = First@Ordering[Abs[Select[nch["VDS"], .5 <= # <= .7 &] - 0.6], 1];
   nJ = yy[[j, 2]]; dnJ = yy[[j, 5]]; dvtJ = yy[[j, 6]]; djsJ = yy[[j, 7]];
-  gmidLut = Map[N40Interpolant[nch, "GM_ID"][L, #, 0.6, VSB] &, vgs];
+  gmidLut = lookup[nch, "GM_ID", "L", L, "VGS", vgs, "VDS", 0.6, "VSB", VSB];
   qG = Map[Max[1/(nJ*UT*#) - 1, $MachineEpsilon] &, gmidLut];
   xG = 2 (qG - 1) + Log[qG];
-  gainLut = Map[N40Interpolant[nch, "GAIN"][L, #, 0.6, VSB] &, vgs];
+  gainLut = lookup[nch, "GAIN", "L", L, "VGS", vgs, "VDS", 0.6, "VSB", VSB];
   gainEkv = 1/(djsJ/gmidLut - dvtJ - xG*dnJ);
   ListLogPlot[{Transpose[{gmidLut, gainLut}], Transpose[{gmidLut, gainEkv}]},
    PlotStyle -> {Blue, {Red, Dashed}}, PlotLegends -> {"Lookup", "EKV"},

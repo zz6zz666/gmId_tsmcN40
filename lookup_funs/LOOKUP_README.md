@@ -71,16 +71,55 @@ wt = lookup(nch, 'GM_CGG', 'GM_ID', [5, 10, 15], 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
 
 > pch 文件同样使用**正电压域**（|VSG|、|VSD|）查询，与 nch 一致。
 
+### 附录缺省值
+
+| 函数 | 缺省值 |
+| --- | --- |
+| `lookup` | `L=min(data.L)`，`VGS=data.VGS`，`VDS=max(data.VDS)/2`，`VSB=0` |
+| `lookup` 交叉查表 | 最终一维插值 `METHOD='pchip'`，提示 `WARNING='on'`；多维插值固定为线性 |
+| `lookupVGS` | `L=min(data.L)`，`VDS=max(data.VDS)/2`，`VSB=0`，`METHOD='pchip'` |
+| `XTRACT` | `rho=0.6`，`TEMP=300 K` |
+| `XTRACT2` | `rho=0.6`，温度按 `300 K`；输入 `ID` 不做宽度归一化，返回 `IS` |
+
+`lookupVGS` 按附录限制为至多一个向量输入。交叉查表显式传入 `VGS` 时，该向量用作
+交点搜索范围；未传入时使用完整的 `data.VGS`。
+
+`XTRACT2` 额外保留 `TEMP` 和 `W` 扩展参数。两者均不影响缺省调用：`TEMP` 缺省为
+300 K，`W=None` 表示直接使用总电流并返回 `IS`；只有显式传入 `W`（µm）时才使用
+`ID/W` 并返回电流密度 `JS`。
+
+```python
+from ekv_extract import XTRACT, XTRACT2
+
+y = XTRACT(nch, 0.1, 0.55, 0)       # rho=0.6, TEMP=300 K
+p = XTRACT2(vgs, ids)                 # [n, VT, IS], rho=0.6, 300 K
+p_density = XTRACT2(vgs, ids, W=10)   # [n, VT, JS]
+```
+
 ## 5. Mathematica
 
-HDF5 可直接用 Mathematica `Import` 读取。见项目 `mathematica/tsmcN40_lookup.wl`：
+Mathematica API 与附录及本项目 Python API 保持相同的函数划分和参数顺序。见项目
+`mathematica/tsmcN40_lookup.wl`：
 
 ```mathematica
 << "mathematica/tsmcN40_lookup.wl";
 data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
-f = N40Interpolant[data, "GM_ID"];
-f[0.1, 0.6, 0.7, 0.0]              (* 4-D 插值查表 (L,VGS,VDS,VSB) *)
-cur = SliceVGS[data, "GM_ID", 0.1, 0.7, 0.0];   (* 固定 (L,VDS,VSB) 扫 VGS *)
+
+gmId = lookup[data, "GM_ID", "VGS", 0.6, "VDS", 0.7, "VSB", 0, "L", 0.1];
+vgs = lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "VSB", 0, "L", 0.1];
+wt = lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7,
+  "VSB", 0, "L", 0.1];
 ```
 
-也可直接取数组后用 `ListInterpolation` 自建插值。
+参数使用与 Matlab/Python 相同的交替名称和值形式，名称不区分大小写，未提供的
+`L/VGS/VDS/VSB` 使用附录规定的默认值。`N40Interpolant` 和 `SliceVGS` 仍保留为底层接口。
+
+```mathematica
+<< "mathematica/ekv_extract.wl";
+y = XTRACT[data, 0.1, 0.55, 0];
+p = XTRACT2[vgs, ids];
+pDensity = XTRACT2[vgs, ids, 0.6, 300., 10.];
+```
+
+Mathematica 的 `XTRACT2` 宽度扩展缺省为 `Automatic`，语义与 Python 的 `W=None`
+相同：不做宽度归一化。

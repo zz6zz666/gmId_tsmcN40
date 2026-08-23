@@ -53,19 +53,22 @@ ekvCore[vgs_List, gmId_List, jd_List, rho_, UT_] := Module[
 
 XTRACT[data_Association, L_?NumericQ, VDS_, VSB_?NumericQ,
   rho_ : 0.6, TEMP_ : 300.0] := Module[
-  {UT, vdsList, vdsGrid, fid, fgmid, rows, validRows, vdsVec, nVec, vtVec,
+  {UT, vdsList, vdsGrid, vgsGrid, jdGrid, gmIdGrid, rows, validRows, vdsVec, nVec, vtVec,
    jsVec, vdsVec1, vdsVec2, d1n, d1vt, d1js, d2n, d2vt, d2js, interp,
    eval, out},
   UT = kB*TEMP/qe;
-  fid = N40Interpolant[data, "ID"];
-  fgmid = N40Interpolant[data, "GM_ID"];
   vdsList = Flatten[{VDS}];
   vdsGrid = Rest[data["VDS"]];
+  vgsGrid = data["VGS"];
+  jdGrid = lookup[data, "ID_W", "L", L, "VGS", vgsGrid, "VDS", vdsGrid,
+    "VSB", VSB, "WARNING", "off"];
+  gmIdGrid = lookup[data, "GM_ID", "L", L, "VGS", vgsGrid, "VDS", vdsGrid,
+    "VSB", VSB, "WARNING", "off"];
   rows = Table[
-    Module[{vgs, jd, gmid, sel, core},
-      vgs = data["VGS"];
-      jd = Map[fid[L, #, vds, VSB] &, vgs]/data["W"];
-      gmid = Map[fgmid[L, #, vds, VSB] &, vgs];
+    Module[{vds = vdsGrid[[ivds]], vgs, jd, gmid, sel, core},
+      vgs = vgsGrid;
+      jd = jdGrid[[All, ivds]];
+      gmid = gmIdGrid[[All, ivds]];
       sel = Select[Transpose[{vgs, jd, gmid}],
         NumberQ[#[[2]]] && NumberQ[#[[3]]] &];
       core = If[sel == {}, Indeterminate,
@@ -74,7 +77,7 @@ XTRACT[data_Association, L_?NumericQ, VDS_, VSB_?NumericQ,
         {vds, Indeterminate, Indeterminate, Indeterminate},
         {vds, core[[1]], core[[2]], core[[3]]}]
     ],
-    {vds, vdsGrid}];
+    {ivds, Length[vdsGrid]}];
   validRows = Select[rows,
     And @@ (NumberQ /@ #[[2 ;; 4]]) && #[[4]] > 0 &];
   If[Length[validRows] < 4,
@@ -110,7 +113,8 @@ XTRACT[data_Association, L_?NumericQ, VDS_, VSB_?NumericQ,
   ]
 ];
 
-XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0, WWidth_ : 10.] := Module[
+XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0,
+  WWidth_ : Automatic] := Module[
   {UT, idMat, ncols, out},
   UT = kB*TEMP/qe;
   idMat = Which[
@@ -123,7 +127,7 @@ XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0, WWidth_ : 10.] := Module[
   out = Table[
     Module[{vgs, idv, valid, gmId, core},
       vgs = VGS;
-      idv = idMat[[All, c]]/WWidth;
+      idv = If[WWidth === Automatic, idMat[[All, c]], idMat[[All, c]]/WWidth];
       valid = Select[Transpose[{vgs, idv}],
         NumberQ[#[[2]]] && #[[2]] > 0 &];
       If[Length[valid] < 3,

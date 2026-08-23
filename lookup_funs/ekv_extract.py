@@ -196,13 +196,13 @@ def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
     if out.shape[0] == 1:
         return out.flatten()
     return out
-def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0, W=10.0):
+def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0, W=None):
     """
     Extract basic EKV parameters from directly-supplied I_D(V_GS) data.
 
     Syntax (Matlab-compatible) ::
 
-        p = XTRACT2(VGS, ID, rho=0.6, TEMP=300.0)
+        p = XTRACT2(VGS, ID, rho=0.6)
 
     Parameters
     ----------
@@ -214,16 +214,19 @@ def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0, W=10.0):
         curve (same VGS sweep).
     rho : float, optional
         Normalized transconductance efficiency.  Default is 0.6.
+    TEMP : float, optional
+        Absolute temperature (K).  Default is 300 K.  This is an extension
+        of the Appendix API, where 300 K is fixed.
     W : float, optional
-        Device width (µm).  ``ID`` is divided by ``W`` so the returned
-        ``JS`` is a current density (A/µm), consistent with :func:`XTRACT`.
-
+        If explicitly supplied, divide ``ID`` by the device width in µm and
+        return ``JS`` instead of total-device ``IS``.  By default no width
+        normalization is applied, matching the Appendix.
     Returns
     -------
     np.ndarray
-        * If ``ID`` is a 1-D vector — shape ``(3,)`` with ``[n, VT, JS]``.
+        * If ``ID`` is a 1-D vector — shape ``(3,)`` with ``[n, VT, IS]``.
         * If ``ID`` is a 2-D matrix — shape ``(M, 3)`` where ``M`` is the
-          number of curves.  Each row holds ``[n, VT, JS]``.
+          number of curves.  Each row holds ``[n, VT, IS]``.
     """
     VGS = np.asarray(VGS).flatten()
     ID_arr = np.asarray(ID)
@@ -252,7 +255,9 @@ def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0, W=10.0):
 
     out = []
     for m in range(M):
-        id_vec = ID_arr[:, m].copy() / W
+        id_vec = ID_arr[:, m].copy()
+        if W is not None:
+            id_vec /= W
         vgs = VGS.copy()
 
         valid = np.isfinite(id_vec) & (id_vec > 0)

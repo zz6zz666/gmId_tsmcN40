@@ -14,6 +14,10 @@ scriptDir = FileNameJoin[{dataDir, "mathematica"}];
 Get[FileNameJoin[{scriptDir, "tsmcN40_lookup.wl"}]];
 
 nch[corner_] := LoadTsmcN40[FileNameJoin[{dataDir, "nch_" <> corner <> ".h5"}]];
+nchGMID[corner_] := LoadTsmcN40[
+  FileNameJoin[{dataDir, "nch_" <> corner <> ".h5"}],
+  {"CORNER", "DEVICE", "INFO", "TEMP", "W", "NFING", "L", "VGS", "VDS",
+   "VSB", "GM_ID"}];
 pch[corner_] := LoadTsmcN40[FileNameJoin[{dataDir, "pch_" <> corner <> ".h5"}]];
 
 tt = nch["tt"];
@@ -41,8 +45,8 @@ vgs = tt["VGS"];
 
 (* \:56fa\:5b9a (VSB,VDS) \:6cbf VGS \:626b\:51fa\:5404 L \:7684\:4e00\:7ec4\:66f2\:7ebf *)
 fam[data_, var_, vsb_, vds_, Ls_] :=
-  With[{fi = N40Interpolant[data, var]},
-    Table[Map[fi[L, #, vds, vsb] &, vgs], {L, Ls}]];
+  lookup[data, var, "VGS", vgs, "VSB", vsb, "VDS", vds, "L", Ls,
+    "WARNING", "off"];
 
 legend[Ls_] := LineLegend[cols, Map["L=" <> ToString[#] <> " um" &, Ls],
   LegendLabel -> "L"];
@@ -69,9 +73,10 @@ ListLogPlot[fam[tt, "ID", 0, 0.55, Ls], DataRange -> {0, 1.1},
    3. ID vs VDS\:ff08\:8f93\:51fa\:7279\:6027\:65cf\:ff09 \[LongDash] \:9971\:548c\:533a\:5e94\:5e73\:5766\:3001\:65e0\:626d\:7ed3(kink)\:3001\:65e0\:5f02\:5e38\:53cd\:5f39
    ===================================================================== *)
 vgsO = {0.4, 0.6, 0.8, 1.0};
-With[{fi = N40Interpolant[tt, "ID"], vd = tt["VDS"]},
+With[{vd = tt["VDS"], curves = lookup[tt, "ID", "L", 0.1, "VGS", vgsO,
+    "VDS", tt["VDS"], "VSB", 0]},
   ListLinePlot[
-    Table[{vds, fi[0.1, vg, vds, 0]}, {vg, vgsO}, {vds, vd}],
+    Table[Transpose[{vd, curves[[i]]}], {i, Length[vgsO]}],
     AxesLabel -> {"VDS (V)", "ID (A)"},
     PlotLabel -> "nch tt: ID vs VDS  L=0.1um VSB=0",
     PlotLegends -> LineLegend[Automatic, Map["VGS=" <> ToString[#] <> "V" &, vgsO]],
@@ -102,12 +107,11 @@ ListLogLogPlot[
 (* =====================================================================
    6. \:7535\:5bb9 Cgg / Cgs / Cgd vs VGS  \[LongDash] \:5e94>0 \:4e14\:5e73\:6ed1\:3001\:91cf\:7ea7\:5408\:7406
    ===================================================================== *)
-With[{fg = N40Interpolant[tt, "CGG"], fs = N40Interpolant[tt, "CGS"],
-   fd = N40Interpolant[tt, "CGD"]},
+With[{},
   ListLinePlot[{
-    Map[fg[0.1, #, 0.55, 0] &, vgs],
-    Map[fs[0.1, #, 0.55, 0] &, vgs],
-    Map[fd[0.1, #, 0.55, 0] &, vgs]},
+    lookup[tt, "CGG", "L", 0.1, "VGS", vgs, "VDS", 0.55, "VSB", 0],
+    lookup[tt, "CGS", "L", 0.1, "VGS", vgs, "VDS", 0.55, "VSB", 0],
+    lookup[tt, "CGD", "L", 0.1, "VGS", vgs, "VDS", 0.55, "VSB", 0]},
    DataRange -> {0, 1.1}, PlotRange -> All,
    PlotStyle -> {Blue, Orange, Red},
    PlotLegends -> LineLegend[{"Cgg", "Cgs", "Cgd"}],
@@ -127,9 +131,10 @@ ListLinePlot[fam[tt, "VDSAT", 0, 0.55, Ls], DataRange -> {0, 1.1},
 (* =====================================================================
    8. \:4f53\:6548\:5e94 \[LongDash] ID vs VGS, VSB=0..0.8 \:ff08VT \:5e94\:968f |VSB| \:589e\:5927\:3001\:4e9a\:9608\:659c\:7387\:7565\:53d8\:ff09
    ===================================================================== *)
-With[{fi = N40Interpolant[tt, "ID"], vsbs = {0.0, 0.2, 0.4, 0.6, 0.8}},
+With[{vsbs = {0.0, 0.2, 0.4, 0.6, 0.8}},
   ListLogPlot[
-    Table[Map[fi[0.1, #, 0.55, vsb] &, vgs], {vsb, vsbs}],
+    Transpose[lookup[tt, "ID", "L", 0.1, "VGS", vgs, "VDS", 0.55,
+      "VSB", vsbs]],
     DataRange -> {0, 1.1}, PlotStyle -> Automatic,
     PlotLegends -> LineLegend[Automatic, Map["VSB=" <> ToString[#] <> "V" &, vsbs]],
     AxesLabel -> {"VGS (V)", "ID (A)"},
@@ -142,8 +147,8 @@ With[{fi = N40Interpolant[tt, "ID"], vsbs = {0.0, 0.2, 0.4, 0.6, 0.8}},
    ===================================================================== *)
 ListLinePlot[
   Table[
-    With[{fi = N40Interpolant[nch[c], "GM_ID"]},
-      Map[fi[0.1, #, 0.55, 0] &, vgs]],
+    lookup[If[c == "tt", tt, nchGMID[c]], "GM_ID", "L", 0.1, "VGS", vgs,
+      "VDS", 0.55, "VSB", 0],
     {c, corners}],
   DataRange -> {0, 1.1},
   PlotStyle -> ColorData["DarkRainbow"][#] & /@ Subdivide[0, 1, Length[corners] - 1],
@@ -153,23 +158,25 @@ ListLinePlot[
   GridLines -> Automatic]
 
 (* =====================================================================
-   10. gm/ID \:4e8c\:7ef4\:4e91\:56fe (VGS, VDS) \[LongDash] \:68c0\:67e5\:7f51\:683c\:8986\:76d6/\:8fde\:7eed\:6027
+   10. gm/ID \:4e8c\:7ef4\:4e91\:56fe (VDS, VGS) \[LongDash] \:68c0\:67e5\:7f51\:683c\:8986\:76d6/\:8fde\:7eed\:6027
    ===================================================================== *)
-With[{f = N40Interpolant[tt, "GM_ID"]},
+With[{vgsGrid = Range[0., 1.1, 0.02], vdsGrid = Range[0., 1.1, 0.02]},
+  With[{z = lookup[tt, "GM_ID", "L", 0.1, "VGS", vgsGrid,
+      "VDS", vdsGrid, "VSB", 0]},
   ListContourPlot[
-    Flatten[Table[{vds, vgs, f[0.1, vgs, vds, 0]},
-      {vds, 0, 1.1, 0.02}, {vgs, 0, 1.1, 0.02}], 1],
-   FrameLabel -> {"VGS (V)", "VDS (V)"},
-   PlotLabel -> "nch tt: gm/ID contour  L=0.1um VSB=0",
-   ColorFunction -> "Rainbow", PlotLegends -> Automatic]]
+    Flatten[Table[{vdsGrid[[j]], vgsGrid[[i]], z[[i, j]]},
+      {i, Length[vgsGrid]}, {j, Length[vdsGrid]}], 1],
+    FrameLabel -> {"VDS (V)", "VGS (V)"},
+    PlotLabel -> "nch tt: gm/ID contour  L=0.1um VSB=0",
+    ColorFunction -> "Rainbow", PlotLegends -> Automatic]]]
 
 (* =====================================================================
    11. \:566a\:58f0 STH / SFL vs VGS \[LongDash] \:5173\:65ad\:533a\:4e3a NaN(\:7a7a)\:3001\:5f00\:542f\:533a\:5e94\:6709\:5408\:7406\:91cf\:7ea7
    ===================================================================== *)
-With[{fs = N40Interpolant[tt, "STH"], fl = N40Interpolant[tt, "SFL"]},
+With[{},
   ListLinePlot[{
-    Map[fs[0.1, #, 0.55, 0] &, vgs],
-    Map[fl[0.1, #, 0.55, 0] &, vgs]},
+    lookup[tt, "STH", "L", 0.1, "VGS", vgs, "VDS", 0.55, "VSB", 0],
+    lookup[tt, "SFL", "L", 0.1, "VGS", vgs, "VDS", 0.55, "VSB", 0]},
    DataRange -> {0, 1.1}, PlotRange -> All,
    PlotLegends -> LineLegend[{"STH (id, A^2/Hz)", "SFL (fn, A^2/Hz)"}],
    AxesLabel -> {"VGS (V)", "Noise PSD (A^2/Hz)"},

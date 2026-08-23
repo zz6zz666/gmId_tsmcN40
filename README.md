@@ -139,13 +139,17 @@ HDF5 可直接用 Mathematica `Import` 读取。见 `mathematica/tsmcN40_lookup.
 ```mathematica
 << "mathematica/tsmcN40_lookup.wl"
 data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
-f = N40Interpolant[data, "GM_ID"];      (* 4-D 插值函数，坐标 (L,VGS,VDS,VSB) *)
-f[0.1, 0.6, 0.7, 0.0]                   (* L=0.1um, VGS=0.6V, VDS=0.7V, VSB=0 的 gm/id *)
-data["GM"]/data["CGG"];                 (* 任意比例量 *)
+gmId = lookup[data, "GM_ID", "VGS", 0.6, "VDS", 0.7, "VSB", 0, "L", 0.1];
+vgs = lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "VSB", 0, "L", 0.1];
+wt = lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7, "L", 0.1];
 ```
 
-- 4-D 数组 `(L, VGS, VDS, VSB)` 可直接用 `data["GM_ID"]` 取出；
-  `ListInterpolation[arr, {L, VGS, VDS, VSB}]` 构造插值（脚本已封装）。
+- `lookup`、`lookupVGS` 的函数划分、交替名称/值参数及默认值与附录和 Python API 对齐。
+- `XTRACT`、`XTRACT2` 位于 `mathematica/ekv_extract.wl`，保持附录中的位置参数接口。
+- 附录缺省值为：`lookup` 使用最小 `L`、完整 `VGS`、`VDD/2` 和 `VSB=0`；
+  `lookupVGS` 另使用 PCHIP；`XTRACT/XTRACT2` 使用 `rho=0.6` 和 300 K。
+- `XTRACT2` 缺省直接使用总电流并返回 `IS`。显式提供扩展宽度参数时才返回 `JS=IS/W`。
+- `N40Interpolant`、`SliceVGS` 保留为需要直接操作插值函数时使用的底层接口。
 - 验证：`wolframscript -script mathematica/xtract_demo.wl`（读取真实 .h5，
   打印与 Python `lookup` 一致的插值结果）。
 
