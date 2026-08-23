@@ -196,7 +196,7 @@ def XTRACT(dev, L, VDS, VSB, rho=0.6, TEMP=300.0):
     if out.shape[0] == 1:
         return out.flatten()
     return out
-def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0):
+def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0, W=10.0):
     """
     Extract basic EKV parameters from directly-supplied I_D(V_GS) data.
 
@@ -214,13 +214,16 @@ def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0):
         curve (same VGS sweep).
     rho : float, optional
         Normalized transconductance efficiency.  Default is 0.6.
+    W : float, optional
+        Device width (µm).  ``ID`` is divided by ``W`` so the returned
+        ``JS`` is a current density (A/µm), consistent with :func:`XTRACT`.
 
     Returns
     -------
     np.ndarray
-        * If ``ID`` is a 1-D vector — shape ``(3,)`` with ``[n, VT, IS]``.
+        * If ``ID`` is a 1-D vector — shape ``(3,)`` with ``[n, VT, JS]``.
         * If ``ID`` is a 2-D matrix — shape ``(M, 3)`` where ``M`` is the
-          number of curves.  Each row holds ``[n, VT, IS]``.
+          number of curves.  Each row holds ``[n, VT, JS]``.
     """
     VGS = np.asarray(VGS).flatten()
     ID_arr = np.asarray(ID)
@@ -249,7 +252,7 @@ def XTRACT2(VGS, ID, rho=0.6, TEMP=300.0):
 
     out = []
     for m in range(M):
-        id_vec = ID_arr[:, m].copy()
+        id_vec = ID_arr[:, m].copy() / W
         vgs = VGS.copy()
 
         valid = np.isfinite(id_vec) & (id_vec > 0)

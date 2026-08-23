@@ -110,7 +110,7 @@ XTRACT[data_Association, L_?NumericQ, VDS_, VSB_?NumericQ,
   ]
 ];
 
-XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0] := Module[
+XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0, WWidth_ : 10.] := Module[
   {UT, idMat, ncols, out},
   UT = kB*TEMP/qe;
   idMat = Which[
@@ -123,7 +123,7 @@ XTRACT2[VGS_List, ID_, rho_ : 0.6, TEMP_ : 300.0] := Module[
   out = Table[
     Module[{vgs, idv, valid, gmId, core},
       vgs = VGS;
-      idv = idMat[[All, c]];
+      idv = idMat[[All, c]]/WWidth;
       valid = Select[Transpose[{vgs, idv}],
         NumberQ[#[[2]]] && #[[2]] > 0 &];
       If[Length[valid] < 3,
