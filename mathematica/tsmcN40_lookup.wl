@@ -25,6 +25,10 @@
     lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7]
     lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "L", 0.04]
 
+    (* Map/MapThread batching is enabled on load; native lists stay Cartesian *)
+    lookup[data, "GM_GDS", "GM_ID", #1, "L", #2, "VDS", {0.5, 0.7}] & ~
+      MapThread~ {{10, 15}, {0.04, 0.06}}
+
     (* quick grid values are also directly available *)
     data["VDSAT"];                  (* stored 4-D array *)
     data["GM"]/data["ID"];          (* = GM_ID, computed on the fly *)
@@ -36,6 +40,7 @@
 *)
 
 ClearAll[LoadTsmcN40, lookup, lookupVGS, N40Interpolant, SliceVGS,
+  EnableTsmcN40MapOptimization, DisableTsmcN40MapOptimization,
   n40ParseArgs, n40Array, n40GridValues, n40GridPointValues, n40Squeeze,
   n40DirectLookup, n40DirectLookupScalarVector, n40DirectLookupPointVectors,
   n40DirectLookupScalarPair, n40DirectLookupPairBatch, n40PackedRealArrayQ, n40Compiled4D,
@@ -43,7 +48,11 @@ ClearAll[LoadTsmcN40, lookup, lookupVGS, N40Interpolant, SliceVGS,
   n40CompiledValues, n40CompiledPairValues, n40CompiledPairBatchValues,
   n40CompiledPchipBatch, n40CurveLookupBatch,
   n40Bracket, n40LinearValue, n40PchipEndpoint, n40PchipSlopes,
-  n40PchipValue, n40CurveLookup, n40LookupVGSOne];
+  n40PchipValue, n40CurveLookup, n40LookupVGSOne, n40Threaded,
+  n40ThreadValue, n40MappedDirectLookup, n40MappedLookup,
+  n40MappedLookupVGS, n40MappedDispatch, n40MappedHeldCall,
+  n40MappedFallback, n40HeldLookupBodyQ,
+  n40InstallMapRules, n40RemoveMapRules];
 
 (* Import every dataset of an .h5 file into an Association keyed by name.
    Quiet suppresses benign LibraryFunction::fpexc warnings raised when an
@@ -350,9 +359,9 @@ n40CompiledPairBatchValues[data_Association, name1_String, name2_String,
 (* Sort and invert each mode-3 curve inside the VM. Output column 2 is a
    validity flag so out-of-range targets can be restored as Indeterminate. *)
 n40CompiledPchipBatch = Compile[{
-    {xRows, _Real, 2}, {yRows, _Real, 2}, {targets, _Real, 1},
+    {xRows, _Real, 2}, {yRows, _Real, 2}, {targets, _Real, 2},
     {branchMode, _Integer}},
-  Module[{nr = Length[xRows], ng = Length[xRows[[1]]], nt = Length[targets],
+  Module[{nr = Length[xRows], ng = Length[xRows[[1]]], nt = Length[targets[[1]]],
     output, xs, ys, h, delta, slopes, p, j, k, i, row, start, finish,
     maxIndex, n, unique, xv, yv, target, h1, h2, d1, d2, slope, w1, w2,
     interval, u, u2, u3, value},
@@ -412,7 +421,7 @@ n40CompiledPchipBatch = Compile[{
         ];
       ];
       For[k = 1, k <= nt, k++,
-        row = (p - 1) nt + k; target = targets[[k]];
+        row = (p - 1) nt + k; target = targets[[p, k]];
         If[unique >= 2 && target >= xs[[1]] && target <= xs[[unique]],
           interval = 1;
           While[interval < unique - 1 && xs[[interval + 1]] <= target,
@@ -432,11 +441,16 @@ n40CompiledPchipBatch = Compile[{
 
 n40CurveLookupBatch[xRows_List, yRows_List, targets_List, variable_String,
     method_String] := Module[
-  {packedX, packedY, packedTargets, branchMode, raw, rowValid, validIndices,
-   fallbackIndices, output},
+  {packedX, packedY, packedTargets, targetRows, branchMode, raw, rowValid,
+   validIndices, fallbackIndices, output, targetCount},
   If[ToLowerCase[method] != "pchip", Return[$Failed]];
-  packedTargets = Developer`ToPackedArray[N[targets]];
-  If[!n40PackedRealArrayQ[packedTargets, 1], Return[$Failed]];
+  targetRows = If[ArrayDepth[targets] == 2, targets,
+    ConstantArray[targets, Length[xRows]]];
+  If[Length[targetRows] != Length[xRows] || targetRows === {} ||
+      !SameQ @@ (Length /@ targetRows), Return[$Failed]];
+  targetCount = Length[First[targetRows]];
+  packedTargets = Developer`ToPackedArray[N[targetRows]];
+  If[!n40PackedRealArrayQ[packedTargets, 2], Return[$Failed]];
   rowValid = MapThread[Function[{x, y},
       And @@ MapThread[NumericQ[#1] && NumericQ[#2] &, {x, y}]],
     {xRows, yRows}];
@@ -450,12 +464,13 @@ n40CurveLookupBatch[xRows_List, yRows_List, targets_List, variable_String,
     packedY = Developer`ToPackedArray[N[yRows[[validIndices]]]];
     If[!n40PackedRealArrayQ[packedX, 2] || !n40PackedRealArrayQ[packedY, 2],
       Return[$Failed]];
-    raw = n40CompiledPchipBatch[packedX, packedY, packedTargets, branchMode];
+    raw = n40CompiledPchipBatch[packedX, packedY,
+      packedTargets[[validIndices]], branchMode];
     output[[validIndices]] = Partition[
       MapThread[If[#2 == 1., #1, Indeterminate] &,
-        {raw[[All, 1]], raw[[All, 2]]}], Length[targets]]];
-  Do[output[[i]] = n40CurveLookup[xRows[[i]], yRows[[i]], targets, variable,
-      method], {i, fallbackIndices}];
+        {raw[[All, 1]], raw[[All, 2]]}], targetCount]];
+  Do[output[[i]] = n40CurveLookup[xRows[[i]], yRows[[i]], targetRows[[i]],
+      variable, method], {i, fallbackIndices}];
   output
 ];
 
@@ -696,6 +711,202 @@ n40CurveLookup[x_List, y_List, target_, variable_String, method_String] := Modul
   If[scalarTarget, First[result], result]
 ];
 
+(* Map and MapThread integration. n40Threaded marks the single paired
+   dimension; ordinary lists inside lookup retain their Cartesian semantics. *)
+n40ThreadValue[value_, index_Integer] := If[Head[value] === n40Threaded,
+  value[[1, index]], value];
+
+n40MappedDirectLookup[data_Association, outvar_String, parameterRows_List] :=
+ Module[{axes, queryRows, dimensions, pointRows, counts, allPoints, valid,
+   safePoints, values, starts},
+  axes = data /@ {"L", "VGS", "VDS", "VSB"};
+  queryRows = Table[
+    Flatten[{Lookup[params, #]}] & /@ {"L", "VGS", "VDS", "VSB"},
+    {params, parameterRows}];
+  dimensions = Map[Length, queryRows, {2}];
+  pointRows = Tuples /@ queryRows;
+  counts = Length /@ pointRows;
+  allPoints = Flatten[pointRows, 1];
+  valid = Function[point, And @@ MapThread[
+      NumericQ[#2] && First[#1] <= #2 <= Last[#1] &, {axes, point}]] /@
+    allPoints;
+  safePoints = MapThread[If[#2, N[#1], First /@ axes] &, {allPoints, valid}];
+  values = n40CompiledValues[data, outvar, safePoints];
+  If[values === $Failed, Return[$Failed]];
+  values = MapThread[If[#2, #1, Indeterminate] &, {values, valid}];
+  starts = Most[FoldList[Plus, 1, counts]];
+  MapThread[n40Squeeze[ArrayReshape[Take[values, {#1, #1 + #2 - 1}], #3]] &,
+    {starts, counts, dimensions}]
+];
+
+n40MappedLookup[data_Association, outvar_String, args_List,
+    threadCount_Integer] := Module[
+  {params, defaults, method, warning, nonCoordinates, inputVar, parameterRows,
+   targetRows, lRows, vdsRows, vsbRows, vgsRows, combinationsByThread,
+   counts, allCombinations, pair, starts, rows, result,
+   allTargetRows, allResults, dimensions, t},
+  params = n40ParseArgs[args];
+  If[params === $Failed || !And @@ (FreeQ[#, n40Threaded] ||
+        Head[#] === n40Threaded & /@ Values[params]), Return[$Failed]];
+  defaults = <|"L" -> Min[data["L"]], "VGS" -> data["VGS"],
+    "VDS" -> Max[data["VDS"]]/2, "VSB" -> 0.,
+    "METHOD" -> "pchip", "WARNING" -> "off"|>;
+  params = Join[defaults, params];
+  nonCoordinates = Complement[Keys[params], Keys[defaults]];
+  parameterRows = Table[Map[n40ThreadValue[#, t] &, params],
+    {t, threadCount}];
+  If[nonCoordinates == {},
+    Return[n40MappedDirectLookup[data, outvar, parameterRows]]];
+  If[Length[nonCoordinates] != 1, Return[$Failed]];
+  inputVar = First[nonCoordinates];
+  If[!StringContainsQ[outvar, "_"] || !StringContainsQ[inputVar, "_"],
+    Return[$Failed]];
+  method = ToString[parameterRows[[1, "METHOD"]]];
+  warning = ToLowerCase[ToString[parameterRows[[1, "WARNING"]]]];
+  If[!SameQ @@ (ToString[#["METHOD"]] & /@ parameterRows) ||
+      !SameQ @@ (ToLowerCase[ToString[#["WARNING"]]] & /@ parameterRows),
+    Return[$Failed]];
+  targetRows = Flatten[{#[inputVar]}] & /@ parameterRows;
+  lRows = Flatten[{#["L"]}] & /@ parameterRows;
+  vdsRows = Flatten[{#["VDS"]}] & /@ parameterRows;
+  vsbRows = Flatten[{#["VSB"]}] & /@ parameterRows;
+  vgsRows = Flatten[{#["VGS"]}] & /@ parameterRows;
+  If[!SameQ @@ vgsRows, Return[$Failed]];
+  combinationsByThread = MapThread[Tuples[{#1, #2, #3}] &,
+    {lRows, vdsRows, vsbRows}];
+  counts = Length /@ combinationsByThread;
+  allCombinations = Flatten[combinationsByThread, 1];
+  pair = n40DirectLookupPairBatch[data, inputVar, outvar, allCombinations,
+    First[vgsRows]];
+  If[pair === $Failed, Return[$Failed]];
+  starts = Most[FoldList[Plus, 1, counts]];
+  allTargetRows = Flatten[MapThread[ConstantArray, {targetRows, counts}], 1];
+  allResults = n40CurveLookupBatch[pair[[1]], pair[[2]], allTargetRows,
+    inputVar, method];
+  If[allResults === $Failed, Return[$Failed]];
+  allResults = MapThread[Take[allResults, {#1, #1 + #2 - 1}] &,
+    {starts, counts}];
+  rows = Table[
+    result = allResults[[t]];
+    dimensions = {Length[lRows[[t]]], Length[vdsRows[[t]]],
+      Length[vsbRows[[t]]], Length[targetRows[[t]]]};
+    n40Squeeze[ArrayReshape[Flatten[result], dimensions]],
+    {t, threadCount}];
+  If[warning == "on" && !FreeQ[rows, Indeterminate],
+    Print["lookup warning: ", inputVar,
+      " input out of range (Indeterminate returned)."]];
+  rows
+];
+
+n40MappedLookupVGS[data_Association, args_List, threadCount_Integer] := Module[
+  {params, parameterRows, method, warning, targetVar, targetRows, lRows,
+   vdsRows, vsbRows, combinationsByThread, counts, allCombinations, pair,
+   starts, allTargetRows, allResults, rows, result, dimensions,
+   vgs = data["VGS"], t},
+  params = n40ParseArgs[args];
+  If[params === $Failed || !And @@ (FreeQ[#, n40Threaded] ||
+        Head[#] === n40Threaded & /@ Values[params]), Return[$Failed]];
+  If[KeyExistsQ[params, "VDB"] || KeyExistsQ[params, "VGB"], Return[$Failed]];
+  targetVar = Which[KeyExistsQ[params, "ID_W"], "ID_W",
+    KeyExistsQ[params, "GM_ID"], "GM_ID", True, Return[$Failed]];
+  parameterRows = Table[Map[n40ThreadValue[#, t] &, params],
+    {t, threadCount}];
+  method = ToString[Lookup[parameterRows[[1]], "METHOD", "pchip"]];
+  warning = ToLowerCase[ToString[Lookup[parameterRows[[1]], "WARNING", "off"]]];
+  If[!SameQ @@ (ToString[Lookup[#, "METHOD", "pchip"]] & /@ parameterRows) ||
+      !SameQ @@ (ToLowerCase[ToString[Lookup[#, "WARNING", "off"]]] & /@
+        parameterRows), Return[$Failed]];
+  targetRows = Flatten[{#[targetVar]}] & /@ parameterRows;
+  lRows = Flatten[{Lookup[#, "L", Min[data["L"]]]}] & /@ parameterRows;
+  vdsRows = Flatten[{Lookup[#, "VDS", Max[data["VDS"]]/2]}] & /@ parameterRows;
+  vsbRows = Flatten[{Lookup[#, "VSB", 0.]}] & /@ parameterRows;
+  combinationsByThread = MapThread[Tuples[{#1, #2, #3}] &,
+    {lRows, vdsRows, vsbRows}];
+  counts = Length /@ combinationsByThread;
+  allCombinations = Flatten[combinationsByThread, 1];
+  pair = n40DirectLookupPairBatch[data, targetVar, targetVar,
+    allCombinations, vgs];
+  If[pair === $Failed, Return[$Failed]];
+  starts = Most[FoldList[Plus, 1, counts]];
+  allTargetRows = Flatten[MapThread[ConstantArray, {targetRows, counts}], 1];
+  allResults = n40CurveLookupBatch[pair[[1]],
+    ConstantArray[vgs, Total[counts]], allTargetRows, targetVar, method];
+  If[allResults === $Failed, Return[$Failed]];
+  allResults = MapThread[Take[allResults, {#1, #1 + #2 - 1}] &,
+    {starts, counts}];
+  rows = Table[
+    result = allResults[[t]];
+    dimensions = {Length[lRows[[t]]], Length[vdsRows[[t]]],
+      Length[vsbRows[[t]]], Length[targetRows[[t]]]};
+    n40Squeeze[ArrayReshape[Flatten[result], dimensions]],
+    {t, threadCount}];
+  If[warning == "on" && targetVar == "GM_ID" && !FreeQ[rows, Indeterminate],
+    Print["lookupVGS: GM_ID input larger than maximum!"]];
+  rows
+];
+
+n40MappedFallback[body_HoldComplete, lists_List] := Module[{n, function},
+  function = body /. HoldComplete[expression_] :> Function[expression];
+  n = If[lists === {}, 0, Min[Length /@ lists]];
+  Table[Apply[function, lists[[All, i]]], {i, n}]
+];
+
+n40MappedHeldCall[
+    HoldComplete[lookup[data_, outvar_String, args___]], threadCount_Integer] :=
+  n40MappedLookup[data, outvar, {args}, threadCount];
+
+n40MappedHeldCall[
+    HoldComplete[lookupVGS[data_, args___]], threadCount_Integer] :=
+  n40MappedLookupVGS[data, {args}, threadCount];
+
+n40MappedHeldCall[_, _] := $Failed;
+
+n40MappedDispatch[body_HoldComplete, lists_List] := Module[
+  {lengths, chunks, markers, expression, result},
+  If[lists === {} || !And @@ (ListQ /@ lists),
+    Return[n40MappedFallback[body, lists]]];
+  lengths = Length /@ lists;
+  If[!SameQ @@ lengths, Return[n40MappedFallback[body, lists]]];
+  If[First[lengths] == 0, Return[{}]];
+  If[First[lengths] > 4,
+    chunks = Transpose[Partition[#, UpTo[4]] & /@ lists];
+    Return[Join @@ Table[n40MappedDispatch[body, chunks[[i]]],
+      {i, Length[chunks]}]]];
+  markers = n40Threaded /@ lists;
+  expression = body /. Slot[k_Integer] :> markers[[k]] /.
+    Slot[] :> First[markers];
+  result = n40MappedHeldCall[expression, First[lengths]];
+  If[result === $Failed, n40MappedFallback[body, lists], result]
+];
+
+n40HeldLookupBodyQ[HoldComplete[lookup[__]]] := True;
+n40HeldLookupBodyQ[HoldComplete[lookupVGS[__]]] := True;
+n40HeldLookupBodyQ[_] := False;
+
+n40InstallMapRules[] := Module[{},
+  Unprotect[Map, MapThread];
+  Map[Function[body_], list_List] /;
+      n40HeldLookupBodyQ[HoldComplete[body]] :=
+    n40MappedDispatch[HoldComplete[body], {list}];
+  MapThread[Function[body_], lists_List] /;
+      n40HeldLookupBodyQ[HoldComplete[body]] && lists =!= {} &&
+        And @@ (ListQ /@ lists) && SameQ @@ (Length /@ lists) :=
+    n40MappedDispatch[HoldComplete[body], lists];
+  Protect[Map, MapThread];
+];
+
+n40RemoveMapRules[] := Module[{},
+  Unprotect[Map, MapThread];
+  DownValues[Map] = DeleteCases[DownValues[Map],
+    rule_ /; !FreeQ[rule, n40MappedDispatch]];
+  DownValues[MapThread] = DeleteCases[DownValues[MapThread],
+    rule_ /; !FreeQ[rule, n40MappedDispatch]];
+  Protect[Map, MapThread];
+];
+
+EnableTsmcN40MapOptimization[] := (n40RemoveMapRules[]; n40InstallMapRules[]; Null);
+DisableTsmcN40MapOptimization[] := (n40RemoveMapRules[]; Null);
+
 lookup[data_Association, outvar_String, args___] := Module[
   {params, defaults, method, warning, nonCoordinates, inputVar, targets,
    l, vds, vsb, combinations, rows, result, pair, vgs},
@@ -801,3 +1012,6 @@ SliceVGS[data_Association, varKey_String, l_, vds_, vsb_] :=
   Module[{f}, f = N40Interpolant[data, varKey];
     Table[{g, f[l, g, vds, vsb]}, {g, data["VGS"]}]
   ];
+
+(* Only direct lookup/lookupVGS pure functions are specialized. *)
+EnableTsmcN40MapOptimization[];

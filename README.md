@@ -143,9 +143,20 @@ data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
 gmId = lookup[data, "GM_ID", "VGS", 0.6, "VDS", 0.7, "VSB", 0, "L", 0.1];
 vgs = lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "VSB", 0, "L", 0.1];
 wt = lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7, "L", 0.1];
+
+(* MapThread 参数按位置配对；原生 VDS 列表仍是笛卡尔维度 *)
+gain = lookup[data, "GM_GDS", "GM_ID", #1, "L", #2,
+    "VDS", {0.5, 0.7, 0.9}, "VSB", 0] & ~MapThread~
+  {{8, 10, 12}, {0.04, 0.06, 0.08}};
+Dimensions[gain]                         (* {3, 3} = 配对维度 × VDS维度 *)
 ```
 
 - `lookup`、`lookupVGS` 的函数划分、交替名称/值参数及默认值与附录和 Python API 对齐。
+- 加载查表文件后，函数体直接为 `lookup` 或 `lookupVGS` 的 `/@` 与 `MapThread`
+  会自动合并为分块批量查询。`MapThread` 中的列表按位置配对，函数体内直接传给查表函数的
+  普通列表仍形成笛卡尔积；其他 Mathematica 函数的 `Map`/`MapThread` 行为不变。
+- 可用 `DisableTsmcN40MapOptimization[]` 禁用上述系统规则，并用
+  `EnableTsmcN40MapOptimization[]` 再次启用。复杂 Slot 表达式或不支持的查表模式自动回退到逐项求值。
 - `XTRACT`、`XTRACT2` 位于 `mathematica/ekv_extract.wl`，保持附录中的位置参数接口。
 - 附录缺省值为：`lookup` 使用最小 `L`、完整 `VGS`、`VDD/2` 和 `VSB=0`；
   `lookupVGS` 另使用 PCHIP；`XTRACT/XTRACT2` 使用 `rho=0.6` 和 300 K。
