@@ -44,10 +44,11 @@ D:\tsmcN40_lookup\
 ## 3. 数据结构
 
 - 4-D 数据数组 `(L, VGS, VDS, VSB)`（与官方 Murmann 查找表布局一致），float32 + gzip 压缩。
-- 变量：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS FT GM_ID GAIN VDSAT`，外加噪声 `STH SFL`。
+- 变量：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS VDSAT`，外加噪声 `STH SFL`。
 - 元数据数据集：`CORNER DEVICE INFO TEMP W NFING`。
 - 坐标轴数据集：`L VGS VDS VSB`。
-- 其余比例量（如 `GM_CGG = GM/CGG`、`ID_W = ID/W`）由原始量现算。
+- 其余比例量（如 `GM_CGG = GM/CGG`、`GM_GDS = GM/GDS`、`ID_W = ID/W`）由原始量现算。
+  fT = `GM_CGG/(2π)`，固有增益 = `GM_GDS`。
 
 ## 4. Python API
 
@@ -59,8 +60,8 @@ pch = loadmat(r"D:\tsmcN40_lookup\pch_tt.h5")
 
 # 基础查表
 gm_id = lookup(nch, 'GM_ID', 'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
-gain  = lookup(nch, 'GAIN',  'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
-ft    = lookup(nch, 'FT',    'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
+gain  = lookup(nch, 'GM_GDS', 'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
+ft    = lookup(nch, 'GM_CGG', 'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1) / (2*pi)
 
 # 反查 VGS（给定 gm/id 或电流密度）
 VGS = lookupVGS(nch, 'GM_ID', 15, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
@@ -76,8 +77,8 @@ wt = lookup(nch, 'GM_CGG', 'GM_ID', [5, 10, 15], 'VDS', 0.7, 'VSB', 0, 'L', 0.1)
 | 函数 | 缺省值 |
 | --- | --- |
 | `lookup` | `L=min(data.L)`，`VGS=data.VGS`，`VDS=max(data.VDS)/2`，`VSB=0` |
-| `lookup` 交叉查表 | 最终一维插值 `METHOD='pchip'`，提示 `WARNING='on'`；多维插值固定为线性 |
-| `lookupVGS` | `L=min(data.L)`，`VDS=max(data.VDS)/2`，`VSB=0`，`METHOD='pchip'` |
+| `lookup` 交叉查表 | 最终一维插值 `METHOD='pchip'`，提示 `WARNING='off'`；多维插值固定为线性 |
+| `lookupVGS` | `L=min(data.L)`，`VDS=max(data.VDS)/2`，`VSB=0`，`METHOD='pchip'`，`WARNING='off'` |
 | `XTRACT` | `rho=0.6`，`TEMP=300 K` |
 | `XTRACT2` | `rho=0.6`，温度按 `300 K`；输入 `ID` 不做宽度归一化，返回 `IS` |
 

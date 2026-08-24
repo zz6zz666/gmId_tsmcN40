@@ -97,7 +97,7 @@ for L in lengths:
     vd_sat[L] = lookup(nch, "VDSAT", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off")
     cgg_w[L] = lookup(nch, "CGG", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off") / nch.W * 1e15
     cgd_w[L] = lookup(nch, "CGD", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off") / nch.W * 1e15
-    ft[L] = lookup(nch, "FT", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off") / 1e9
+    ft[L] = lookup(nch, "GM_CGG", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off") / (2 * np.pi) / 1e9
     gain[L] = lookup(nch, "GM_GDS", "VGS", vgs, "VDS", VDS, "VSB", VSB, "L", L, WARNING="off")
 
 # ------------------------------------------------------------------

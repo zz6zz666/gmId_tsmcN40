@@ -8,7 +8,11 @@
       metadata datasets : CORNER, DEVICE, INFO, TEMP, W, NFING
       axis datasets     : L, VGS, VDS, VSB
       4-D variable data : ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB
-                          CDD CSS FT GM_ID GAIN VDSAT  (+ noise STH SFL)
+                          CDD CSS VDSAT  (+ noise STH SFL)
+      derived on the fly (textbook naming): GM_ID = GM/ID,
+                          GM_CGG = GM/CGG (=> fT = GM_CGG/(2 Pi)),
+                          GM_GDS = GM/GDS (=> intrinsic gain), ID_W = ID/W,
+                          ... (see n40Array)
       array order       : (L, VGS, VDS, VSB)   (* official Murmann layout *)
 
   Usage
@@ -22,8 +26,8 @@
     lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "L", 0.04]
 
     (* quick grid values are also directly available *)
-    data["GM_ID"];                  (* (L,VGS,VDS,VSB) numeric array *)
-    data["GM"]/data["ID"];          (* same as "GM_ID" *)
+    data["VDSAT"];                  (* stored 4-D array *)
+    data["GM"]/data["ID"];          (* = GM_ID, computed on the fly *)
     data["GM"]/data["CGG"];         (* gm/Cgg ratio *)
 
     (* fix L/VDS/VSB and plot gm/id vs VGS *)
@@ -69,7 +73,9 @@ n40ParseArgs[args_List] := Module[{pairs},
   Association[(ToUpperCase[First[#]] -> Last[#]) & /@ pairs]
 ];
 
-(* Resolve a stored variable or a ratio such as GM_CGG or ID_W. *)
+(* Resolve a stored variable or a ratio such as GM_CGG or GM_ID.
+   Textbook naming: GM_ID = GM/ID, GM_CGG = GM/CGG (=> fT = GM_CGG/(2 Pi)),
+   GM_GDS = GM/GDS (=> intrinsic gain), ID_W = ID/W. VDSAT is stored. *)
 n40Array[data_Association, name_String] := Module[
   {key = ToUpperCase[name], parts, numerator, denominator},
   If[KeyExistsQ[data, key], Return[data[key]]];
@@ -78,7 +84,8 @@ n40Array[data_Association, name_String] := Module[
   numerator = Lookup[data, parts[[1]], Missing["NotFound"]];
   denominator = If[parts[[2]] == "W", Lookup[data, "W", Missing["NotFound"]],
     Lookup[data, parts[[2]], Missing["NotFound"]]];
-  If[MissingQ[numerator] || MissingQ[denominator], $Failed, numerator/denominator]
+  If[MissingQ[numerator] || MissingQ[denominator], $Failed,
+    Quiet[numerator/denominator]]
 ];
 
 n40Squeeze[value_] := Module[{dims},
@@ -182,7 +189,7 @@ lookup[data_Association, outvar_String, args___] := Module[
   If[params === $Failed, Return[$Failed]];
   defaults = <|"L" -> Min[data["L"]], "VGS" -> data["VGS"],
     "VDS" -> Max[data["VDS"]]/2, "VSB" -> 0.,
-    "METHOD" -> "pchip", "WARNING" -> "on"|>;
+    "METHOD" -> "pchip", "WARNING" -> "off"|>;
   params = Join[defaults, params];
   method = ToString[params["METHOD"]];
   warning = ToLowerCase[ToString[params["WARNING"]]];
@@ -224,12 +231,13 @@ n40LookupVGSOne[data_Association, targetVar_String, targets_List, l_, vds_, vsb_
   ];
 
 lookupVGS[data_Association, args___] := Module[
-  {params, method, targetVar, targets, l, vds, vsb, vdb, vgb, rows,
+  {params, method, warning, targetVar, targets, l, vds, vsb, vdb, vgb, rows,
    sourceBias, vgsSearch, vdsSearch, x, valid, combinations, vectorCount,
    result, step},
   params = n40ParseArgs[{args}];
   If[params === $Failed, Return[$Failed]];
   method = ToString[Lookup[params, "METHOD", "pchip"]];
+  warning = ToLowerCase[ToString[Lookup[params, "WARNING", "off"]]];
   targetVar = Which[KeyExistsQ[params, "ID_W"], "ID_W",
     KeyExistsQ[params, "GM_ID"], "GM_ID", True, Return[$Failed]];
   targets = Flatten[{params[targetVar]}];
@@ -252,7 +260,7 @@ lookupVGS[data_Association, args___] := Module[
     If[Length[valid] < 2, Return[ConstantArray[Indeterminate, Length[targets]]]];
     result = n40Squeeze[n40CurveLookup[valid[[All, 1]], valid[[All, 2]], #,
         targetVar, method] & /@ targets];
-    If[targetVar == "GM_ID" && !FreeQ[result, Indeterminate],
+    If[warning == "on" && targetVar == "GM_ID" && !FreeQ[result, Indeterminate],
       Print["lookupVGS: GM_ID input larger than maximum!"]];
     Return[result]
   ];
@@ -266,7 +274,7 @@ lookupVGS[data_Association, args___] := Module[
   rows = n40LookupVGSOne[data, targetVar, targets, #[[1]], #[[2]], #[[3]],
       method] & /@ combinations;
   result = n40Squeeze[rows];
-  If[targetVar == "GM_ID" && !FreeQ[result, Indeterminate],
+  If[warning == "on" && targetVar == "GM_ID" && !FreeQ[result, Indeterminate],
     Print["lookupVGS: GM_ID input larger than maximum!"]];
   result
 ];

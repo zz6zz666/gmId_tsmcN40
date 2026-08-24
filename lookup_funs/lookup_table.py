@@ -107,7 +107,15 @@ class LookupTable:
 
     def get_array(self, name):
         """
-        Resolve a variable name or a ratio string (e.g. 'GM_ID', 'ID_W').
+        Resolve a variable name or a ratio string (e.g. 'GM_ID', 'GM_CGG').
+
+        Stored primitives are returned directly. Ratios are recomputed on the
+        fly by the generic ``A/B`` rule below, using the textbook naming:
+
+            GM_ID  = GM/ID
+            GM_CGG = GM/CGG      (=> fT = GM_CGG/(2 pi))
+            GM_GDS = GM/GDS      (=> intrinsic gain)
+            ID_W   = ID/W
         """
         arr = self._get_single(name)
         if arr is not None:

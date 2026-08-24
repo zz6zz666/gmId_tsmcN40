@@ -17,7 +17,7 @@ Get[FileNameJoin[{scriptDir, "ekv_extract.wl"}]];
 nch = LoadTsmcN40[FileNameJoin[{dataDir, "nch_tt.h5"}]];
 
 UT = 1.380649*^-23*300./1.602176634*^-19;   (* kT/q @300K *)
-L = 0.1; VDS = 0.55; VSB = 0.; rho = 0.6;   (* VDS=VDD/2 *)
+L = 0.04; VDS = 0.55; VSB = 0.; rho = 0.6;   (* VDS=VDD/2 *)
 vgs = nch["VGS"]; vdsVec = Select[nch["VDS"], # >= 0.3 &];
 
 (* \:53cd\:6c42\:6b63\:5e38\:5316\:7535\:8377 q: x = 2(q-1) + ln(q) *)
@@ -107,7 +107,7 @@ With[{yy = XTRACT[nch, L, Select[nch["VDS"], .5 <= # <= .7 &], VSB, rho]},
   gmidLut = lookup[nch, "GM_ID", "L", L, "VGS", vgs, "VDS", 0.6, "VSB", VSB];
   qG = Map[Max[1/(nJ*UT*#) - 1, $MachineEpsilon] &, gmidLut];
   xG = 2 (qG - 1) + Log[qG];
-  gainLut = lookup[nch, "GAIN", "L", L, "VGS", vgs, "VDS", 0.6, "VSB", VSB];
+  gainLut = lookup[nch, "GM_GDS", "L", L, "VGS", vgs, "VDS", 0.6, "VSB", VSB];
   gainEkv = 1/(djsJ/gmidLut - dvtJ - xG*dnJ);
   ListLogPlot[{Transpose[{gmidLut, gainLut}], Transpose[{gmidLut, gainEkv}]},
    PlotStyle -> {Blue, {Red, Dashed}}, PlotLegends -> {"Lookup", "EKV"},

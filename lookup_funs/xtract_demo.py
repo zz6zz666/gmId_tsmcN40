@@ -224,7 +224,7 @@ gds_id_lut = np.asarray(lookup(nch, 'GDS', 'VGS', nch.VGS, 'VDS', 0.6,
                                'VSB', VSB, 'L', L, WARNING='off')).flatten() / np.asarray(
     lookup(nch, 'ID', 'VGS', nch.VGS, 'VDS', 0.6, 'VSB', VSB, 'L', L,
            WARNING='off')).flatten()
-gain_lut = np.asarray(lookup(nch, 'GAIN', 'VGS', nch.VGS, 'VDS', 0.6,
+gain_lut = np.asarray(lookup(nch, 'GM_GDS', 'VGS', nch.VGS, 'VDS', 0.6,
                              'VSB', VSB, 'L', L, WARNING='off')).flatten()
 q_gain = np.maximum(1.0 / (n_der * UT * gmid_lut) - 1.0, np.finfo(float).tiny)
 x_gain = 2.0 * (q_gain - 1.0) + np.log(q_gain)

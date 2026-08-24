@@ -40,8 +40,9 @@ TSMC N40 (CRN40LP) PDK 的 1.1V 核心 MOS 器件（nch / pch，BSIM4）gm/ID �
   **float32 + gzip(level 6) + shuffle**，chunk = 一个 L 的整片 `(1, VGS, VDS, VSB)`。
 - 元数据存为标量/字符串数据集：`CORNER DEVICE INFO TEMP W NFING`。
 - 坐标轴存为 1-D 数据集：`L VGS VDS VSB`。
-- 变量名：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS FT GM_ID GAIN VDSAT`（+ 噪声 `STH SFL`）。
-  `FT`=fT，`GM_ID`=gm/id，`GAIN`=gm/gds。其余比例量（GM_CGG、ID_W 等）由原始量现算。
+- 变量名：`ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS VDSAT`（+ 噪声 `STH SFL`）。
+  `VDSAT`=BSIM 饱和电压，唯一存储的复合量；其余复合量均为比例，现算：
+  `GM_ID`=gm/id、`GM_CGG`=gm/Cgg（fT=`GM_CGG/(2π)`）、`GM_GDS`=gm/gds（固有增益）、`ID_W`=ID/W。
 
 每文件约 180 MB（float32 + gzip6），10 文件合计约 1.8 GB。
 
@@ -122,13 +123,13 @@ gm_id = lookup(nch, 'GM_ID', 'VGS', 0.6, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)     # �
 VGS   = lookupVGS(nch, 'GM_ID', 15, 'VDS', 0.7, 'VSB', 0, 'L', 0.1)          # 反查 VGS
 wt    = lookup(nch, 'GM_CGG', 'GM_ID', [5, 10, 15], 'VDS', 0.7, 'VSB', 0, 'L', 0.1)  # 交叉查表
 
-nch.GM_ID                                # 直接取 4-D 数组 (L,VGS,VDS,VSB)
-nch.GM / nch.CGG                         # 任意比例量现算（= GM_CGG）
+nch.VDSAT                                # 直接取存储的 4-D 数组 (L,VGS,VDS,VSB)
+nch.GM / nch.CGG                         # 任意比例量现算（= GM_CGG，fT=GM_CGG/(2π)）
 ```
 
-- `loadmat` 返回 `LookupTable`，变量名为属性（`ID GM FT GM_ID ...`），4-D 数组
+- `loadmat` 返回 `LookupTable`，存储变量名为属性（`ID GM VDSAT ...`），4-D 数组
   `(L, VGS, VDS, VSB)`（与官方 .mat 布局一致；也可直接加载官方 `.mat` 文件）。
-- `lookup(data, outvar, ...)`：`outvar` 可为存储变量或比例量（`GM_ID`、`ID_W`、`GM_CGG` 等，
+- `lookup(data, outvar, ...)`：`outvar` 可为存储变量或比例量（`GM_ID`、`ID_W`、`GM_CGG`、`GM_GDS` 等，
   由原始量现算），支持 4-D 插值、交叉查表；`lookupVGS(...)` 按 gm/id 或电流密度反查 VGS。
 - pch 文件用正电压域（|VSG|、|VSD|）查询，与 nch 一致。
 

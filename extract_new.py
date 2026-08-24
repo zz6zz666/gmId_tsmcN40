@@ -11,7 +11,9 @@ Storage format:
   - metadata as scalar/string datasets: CORNER, DEVICE, INFO, TEMP, W, NFING
   - axes as 1-D datasets: L, VGS, VDS, VSB
   - variables: ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB CDD CSS
-               FT GM_ID GAIN VDSAT   (+ noise STH SFL)
+               VDSAT   (+ noise STH SFL)
+  - derived ratios (FT=GM/(2*pi*CGG), GM_ID=GM/ID, GAIN=GM/GDS) are NOT
+    stored; the lookup API recomputes them on the fly from the primitives.
 
 Usage:
   # Full extraction
