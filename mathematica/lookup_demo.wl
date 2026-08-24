@@ -17,7 +17,7 @@ nch[corner_] := LoadTsmcN40[FileNameJoin[{dataDir, "nch_" <> corner <> ".h5"}]];
 nchGMID[corner_] := LoadTsmcN40[
   FileNameJoin[{dataDir, "nch_" <> corner <> ".h5"}],
   {"CORNER", "DEVICE", "INFO", "TEMP", "W", "NFING", "L", "VGS", "VDS",
-   "VSB", "GM_ID"}];
+    "VSB", "GM", "ID"}];
 pch[corner_] := LoadTsmcN40[FileNameJoin[{dataDir, "pch_" <> corner <> ".h5"}]];
 
 tt = nch["tt"];

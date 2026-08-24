@@ -1,58 +1,45 @@
-(*
+(**
   tsmcN40_lookup.wl
   =================
-  Mathematica API for TSMC N40 gm/ID lookup tables (.h5).
+  Mathematica lookup API for TSMC N40 .h5 tables produced by extract_new.py.
 
-  Files are produced by extract_new.py, e.g.  nch_tt.h5, pch_tt.h5, ...
-  Layout (HDF5):
-      metadata datasets : CORNER, DEVICE, INFO, TEMP, W, NFING
-      axis datasets     : L, VGS, VDS, VSB
-      4-D variable data : ID VT IGD IGS GM GMB GDS CGG CGS CSG CGD CDG CGB
-                          CDD CSS VDSAT  (+ noise STH SFL)
-      derived on the fly (textbook naming): GM_ID = GM/ID,
-                          GM_CGG = GM/CGG (=> fT = GM_CGG/(2 Pi)),
-                          GM_GDS = GM/GDS (=> intrinsic gain), ID_W = ID/W,
-                          ... (see n40Array)
-      array order       : (L, VGS, VDS, VSB)   (* official Murmann layout *)
+  Public entry points:
+    LoadTsmcN40       Load a complete or selective table association.
+    lookup            Direct lookup, derived-ratio lookup, and cross-lookup.
+    lookupVGS         Recover VGS from GM_ID or ID_W.
+    N40Interpolant    Build a reusable 4-D linear interpolant.
+    SliceVGS          Return one variable as {VGS, value} samples.
 
-  Usage
-  -----
-    (* load a single device+corner *)
-    data = LoadTsmcN40["D:\\tsmcN40_lookup\\nch_tt.h5"];
-
-    (* Appendix/Python-compatible public API *)
-    lookup[data, "GM_ID", "VGS", 0.6, "VDS", 0.7, "L", 0.04]
-    lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7]
-    lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "L", 0.04]
-
-    (* Map/MapThread batching is enabled on load; native lists stay Cartesian *)
-    lookup[data, "GM_GDS", "GM_ID", #1, "L", #2, "VDS", {0.5, 0.7}] & ~
-      MapThread~ {{10, 15}, {0.04, 0.06}}
-
-    (* quick grid values are also directly available *)
-    data["VDSAT"];                  (* stored 4-D array *)
-    data["GM"]/data["ID"];          (* = GM_ID, computed on the fly *)
-    data["GM"]/data["CGG"];         (* gm/Cgg ratio *)
-
-    (* fix L/VDS/VSB and plot gm/id vs VGS *)
-    cur = SliceVGS[data, "GM_ID", 0.04, 0.7, 0.0];
-    ListLinePlot[cur, AxesLabel -> {"VGS (V)", "gm/id (S/A)"}]
-*)
+  The five lookup modes, batching rules, return dimensions, and examples are
+  documented in mathematica/README.md. Internal n40* symbols are implementation
+  details and may change without affecting the public API.
+**)
 
 ClearAll[LoadTsmcN40, lookup, lookupVGS, N40Interpolant, SliceVGS,
   EnableTsmcN40MapOptimization, DisableTsmcN40MapOptimization,
   n40ParseArgs, n40Array, n40GridValues, n40GridPointValues, n40Squeeze,
   n40DirectLookup, n40DirectLookupScalarVector, n40DirectLookupPointVectors,
-  n40DirectLookupScalarPair, n40DirectLookupPairBatch, n40PackedRealArrayQ, n40Compiled4D,
-  n40Compiled4DPair, n40Compiled4DPairBatch, n40CompiledInputs,
-  n40CompiledValues, n40CompiledPairValues, n40CompiledPairBatchValues,
+   n40DirectLookupPairBatch, n40PackedRealArrayQ, n40Compiled4D,
+  n40Compiled4DPairBatch,
+  n40CompiledInputs,
+   n40CompiledValues, n40CompiledPairBatchValues,
+   n40CompiledMultiValuesPrepared,
+   n40CompiledPointKernel,
+  n40CompiledVGSBatchKernel, n40CompiledVGSBatchValues,
+  n40DirectLookupMulti,
   n40CompiledPchipBatch, n40CurveLookupBatch,
   n40Bracket, n40LinearValue, n40PchipEndpoint, n40PchipSlopes,
   n40PchipValue, n40CurveLookup, n40LookupVGSOne, n40Threaded,
-  n40ThreadValue, n40MappedDirectLookup, n40MappedLookup,
+  n40DirectLookupVGSBatch,
+   n40ThreadValue, n40MappedDirectLookup, n40MappedLookup,
+   n40MappedLookupOutputList,
   n40MappedLookupVGS, n40MappedDispatch, n40MappedHeldCall,
   n40MappedFallback, n40HeldLookupBodyQ,
-  n40InstallMapRules, n40RemoveMapRules];
+  n40InstallMapRules, n40RemoveMapRules, n40CartesianChunkPoints,
+  n40CompiledCartesianSlice, n40CompiledCartesianLookup];
+
+(* Limit temporary point and result arrays for large Cartesian queries. *)
+n40CartesianChunkSize = 32768;
 
 (* Import every dataset of an .h5 file into an Association keyed by name.
    Quiet suppresses benign LibraryFunction::fpexc warnings raised when an
@@ -182,51 +169,6 @@ n40Compiled4D = Compile[{
     output],
   RuntimeOptions -> "Speed"];
 
-(* Fused kernel for mode 3. Bracket search and 16-corner weights are shared
-   while the input and output ratios are accumulated independently. *)
-n40Compiled4DPair = Compile[{
-    {lAxis, _Real, 1}, {gAxis, _Real, 1}, {dAxis, _Real, 1},
-    {sAxis, _Real, 1}, {numerator1, _Real, 4}, {denominator1, _Real, 4},
-    {divide1, _Integer}, {numerator2, _Real, 4}, {denominator2, _Real, 4},
-    {divide2, _Integer}, {points, _Real, 2}},
-  Module[{n = Length[points], output, p, il, ig, id, is, a, b, c, d,
-    l, g, vd, vs, wl, wg, wd, ws, value1, value2, valid1, valid2,
-    den1, den2, corner1, corner2, weight},
-    output = Table[0.0, {Length[points]}, {4}];
-    For[p = 1, p <= n, p++,
-      l = points[[p, 1]]; g = points[[p, 2]];
-      vd = points[[p, 3]]; vs = points[[p, 4]];
-      il = 1; While[il < Length[lAxis] - 1 && lAxis[[il + 1]] <= l, il++];
-      ig = 1; While[ig < Length[gAxis] - 1 && gAxis[[ig + 1]] <= g, ig++];
-      id = 1; While[id < Length[dAxis] - 1 && dAxis[[id + 1]] <= vd, id++];
-      is = 1; While[is < Length[sAxis] - 1 && sAxis[[is + 1]] <= vs, is++];
-      wl = (l - lAxis[[il]])/(lAxis[[il + 1]] - lAxis[[il]]);
-      wg = (g - gAxis[[ig]])/(gAxis[[ig + 1]] - gAxis[[ig]]);
-      wd = (vd - dAxis[[id]])/(dAxis[[id + 1]] - dAxis[[id]]);
-      ws = (vs - sAxis[[is]])/(sAxis[[is + 1]] - sAxis[[is]]);
-      value1 = 0.0; value2 = 0.0; valid1 = 1.0; valid2 = 1.0;
-      For[a = 0, a <= 1, a++, For[b = 0, b <= 1, b++,
-        For[c = 0, c <= 1, c++, For[d = 0, d <= 1, d++,
-          den1 = denominator1[[il + a, ig + b, id + c, is + d]];
-          den2 = denominator2[[il + a, ig + b, id + c, is + d]];
-          If[divide1 == 1,
-            If[den1 == 0.0, valid1 = 0.0; corner1 = 0.0,
-              corner1 = numerator1[[il + a, ig + b, id + c, is + d]]/den1],
-            corner1 = numerator1[[il + a, ig + b, id + c, is + d]]];
-          If[divide2 == 1,
-            If[den2 == 0.0, valid2 = 0.0; corner2 = 0.0,
-              corner2 = numerator2[[il + a, ig + b, id + c, is + d]]/den2],
-            corner2 = numerator2[[il + a, ig + b, id + c, is + d]]];
-          weight = If[a == 0, 1.0 - wl, wl] If[b == 0, 1.0 - wg, wg]
-            If[c == 0, 1.0 - wd, wd] If[d == 0, 1.0 - ws, ws];
-          value1 += weight corner1; value2 += weight corner2;
-        ]]]];
-      output[[p, 1]] = value1; output[[p, 2]] = valid1;
-      output[[p, 3]] = value2; output[[p, 4]] = valid2;
-    ];
-    output],
-  RuntimeOptions -> "Speed"];
-
 (* Batch form for Cartesian mode-3 sweeps. L/VDS/VSB brackets are computed
    once per bias combination and reused for every VGS sample in that row. *)
 n40Compiled4DPairBatch = Compile[{
@@ -315,24 +257,67 @@ n40CompiledValues[data_Association, name_String, points_List] := Module[
     {raw[[All, 1]], raw[[All, 2]]}]
 ];
 
-n40CompiledPairValues[data_Association, name1_String, name2_String,
-    points_List] := Module[{inputs1, inputs2, axes, packedPoints, raw},
-  If[points == {}, Return[{{}, {}}]];
-  inputs1 = n40CompiledInputs[data, name1];
-  inputs2 = n40CompiledInputs[data, name2];
-  If[inputs1 === $Failed || inputs2 === $Failed, Return[$Failed]];
-  axes = data /@ {"L", "VGS", "VDS", "VSB"};
-  If[!And @@ (n40PackedRealArrayQ[#, 1] & /@ axes), Return[$Failed]];
-  packedPoints = Developer`ToPackedArray[N[points]];
-  If[!n40PackedRealArrayQ[packedPoints, 2], Return[$Failed]];
-  raw = n40Compiled4DPair[Sequence @@ axes,
-    inputs1[[1]], inputs1[[2]], inputs1[[3]],
-    inputs2[[1]], inputs2[[2]], inputs2[[3]], packedPoints];
-  {MapThread[If[#2 == 1., inputs1[[4]] #1, Indeterminate] &,
-     {raw[[All, 1]], raw[[All, 2]]}],
-   MapThread[If[#2 == 1., inputs2[[4]] #1, Indeterminate] &,
-     {raw[[All, 3]], raw[[All, 4]]}]}
-];
+(* Generate a fixed-signature point kernel. Tables remain separate 4-D
+   arguments; only the output statements vary with N. *)
+n40CompiledPointKernel[n_Integer?Positive, divideFlags_List] :=
+  n40CompiledPointKernel[n, divideFlags] = Module[
+    {decls, locals, init, updates, writes, source},
+    decls = StringRiffle[Table[
+      "{num" <> ToString[i] <> ",_Real,4},{den" <> ToString[i] <>
+        ",_Real,4},{div" <> ToString[i] <> ",_Integer},{scale" <>
+        ToString[i] <> ",_Real}", {i, n}], ","];
+    locals = StringRiffle[Flatten[Table[
+      {"value" <> ToString[i], "valid" <> ToString[i],
+       "corner" <> ToString[i], "dv" <> ToString[i]}, {i, n}]], ","];
+    init = StringRiffle[Table["value" <> ToString[i] <> "=0.;valid" <>
+        ToString[i] <> "=1.", {i, n}], ";"];
+    updates = StringRiffle[Table[
+      If[divideFlags[[i]] == 1,
+        "dv" <> ToString[i] <> "=den" <> ToString[i] <>
+        "[[il+a,ig+b,id+c,is+d]];If[dv" <> ToString[i] <>
+        "==0.,valid" <> ToString[i] <> "=0.;corner" <> ToString[i] <>
+        "=0.,corner" <> ToString[i] <> "=num" <> ToString[i] <>
+        "[[il+a,ig+b,id+c,is+d]]/dv" <> ToString[i] <> "]",
+        "corner" <> ToString[i] <> "=num" <> ToString[i] <>
+        "[[il+a,ig+b,id+c,is+d]]"] <> ";value" <> ToString[i] <>
+        "+=weight corner" <> ToString[i], {i, n}], ";"];
+    writes = StringRiffle[Table[
+      "output[[p," <> ToString[2 i - 1] <> "]]=scale" <> ToString[i] <>
+      " value" <> ToString[i] <> ";output[[p," <> ToString[2 i] <>
+      "]]=valid" <> ToString[i], {i, n}], ";"];
+    source = "Compile[{{lAxis,_Real,1},{gAxis,_Real,1},{dAxis,_Real,1}," <>
+      "{sAxis,_Real,1}," <> decls <> ",{points,_Real,2}},Module[" <>
+      "{np=Length[points],output,p,il,ig,id,is,a,b,c,d,l,g,vd,vs,wl,wg,wd,ws,weight," <>
+      locals <> "},output=Table[0.,{np},{" <> ToString[2 n] <> "}];" <>
+      "For[p=1,p<=np,p++,l=points[[p,1]];g=points[[p,2]];vd=points[[p,3]];vs=points[[p,4]];" <>
+      "il=1;While[il<Length[lAxis]-1&&lAxis[[il+1]]<=l,il++];" <>
+      "ig=1;While[ig<Length[gAxis]-1&&gAxis[[ig+1]]<=g,ig++];" <>
+      "id=1;While[id<Length[dAxis]-1&&dAxis[[id+1]]<=vd,id++];" <>
+      "is=1;While[is<Length[sAxis]-1&&sAxis[[is+1]]<=vs,is++];" <>
+      "wl=(l-lAxis[[il]])/(lAxis[[il+1]]-lAxis[[il]]);" <>
+      "wg=(g-gAxis[[ig]])/(gAxis[[ig+1]]-gAxis[[ig]]);" <>
+      "wd=(vd-dAxis[[id]])/(dAxis[[id+1]]-dAxis[[id]]);" <>
+      "ws=(vs-sAxis[[is]])/(sAxis[[is+1]]-sAxis[[is]]);" <> init <> ";" <>
+      "For[a=0,a<=1,a++,For[b=0,b<=1,b++,For[c=0,c<=1,c++,For[d=0,d<=1,d++," <>
+      "weight=If[a==0,1.-wl,wl] If[b==0,1.-wg,wg] If[c==0,1.-wd,wd] If[d==0,1.-ws,ws];" <>
+      updates <> "]]]];" <> writes <> "];output],RuntimeOptions->\"Speed\"]";
+    ToExpression[source]
+  ];
+
+n40CompiledMultiValuesPrepared[data_Association, names_List, points_List,
+    inputs_List] := Module[{n = Length[names], axes, raw},
+  If[names == {} || points == {}, Return[{}]];
+  If[n >= 2,
+    axes = data /@ {"L", "VGS", "VDS", "VSB"};
+    If[!And @@ (n40PackedRealArrayQ[#, 1] & /@ axes), Return[$Failed]];
+    raw = n40CompiledPointKernel[n, inputs[[All, 3]]][Sequence @@ axes,
+      Sequence @@ Flatten[inputs, 1], Developer`ToPackedArray[N[points]]];
+    Return[Table[MapThread[
+      If[#2 == 1., #1, Indeterminate] &,
+      {raw[[All, 2 r - 1]], raw[[All, 2 r]]}], {r, n}]]
+  ];
+  {n40CompiledValues[data, First[names], points]}
+ ];
 
 n40CompiledPairBatchValues[data_Association, name1_String, name2_String,
     combinations_List, vgs_List] := Module[
@@ -353,7 +338,85 @@ n40CompiledPairBatchValues[data_Association, name1_String, name2_String,
   {MapThread[If[#2 == 1., inputs1[[4]] #1, Indeterminate] &,
      {raw[[All, 1]], raw[[All, 2]]}],
    MapThread[If[#2 == 1., inputs2[[4]] #1, Indeterminate] &,
-     {raw[[All, 3]], raw[[All, 4]]}]}
+      {raw[[All, 3]], raw[[All, 4]]}]}
+];
+
+(* Generate a fixed-signature VGS sweep kernel. Unlike the point kernel, this
+   kernel keeps the three non-VGS brackets outside the VGS loop and evaluates
+   all requested curves in the same corner traversal. The output is flattened
+   by combination, then VGS, with value/validity columns for each variable. *)
+n40CompiledVGSBatchKernel[n_Integer?Positive, divideFlags_List] :=
+  n40CompiledVGSBatchKernel[n, divideFlags] = Module[
+    {decls, locals, init, updates, writes, source},
+    decls = StringRiffle[Table[
+      "{num" <> ToString[i] <> ",_Real,4},{den" <> ToString[i] <>
+        ",_Real,4},{div" <> ToString[i] <> ",_Integer},{scale" <>
+        ToString[i] <> ",_Real}", {i, n}], ","];
+    locals = StringRiffle[Flatten[Table[
+      {"value" <> ToString[i], "valid" <> ToString[i],
+       "corner" <> ToString[i], "dv" <> ToString[i]}, {i, n}]], ","];
+    init = StringRiffle[Table[
+      "value" <> ToString[i] <> "=0.;valid" <> ToString[i] <> "=1.",
+      {i, n}], ";"];
+    updates = StringRiffle[Table[
+      If[divideFlags[[i]] == 1,
+        "dv" <> ToString[i] <> "=den" <> ToString[i] <>
+          "[[il+a,ig+b,id+c,is+d]];If[dv" <> ToString[i] <>
+          "==0.,valid" <> ToString[i] <> "=0.];corner" <>
+          ToString[i] <> "=num" <> ToString[i] <>
+          "[[il+a,ig+b,id+c,is+d]]/(dv" <>
+          ToString[i] <> "+If[dv" <> ToString[i] <> "==0.,1.,0.])",
+        "corner" <> ToString[i] <> "=num" <> ToString[i] <>
+          "[[il+a,ig+b,id+c,is+d]]"] <> ";value" <> ToString[i] <>
+        "+=weight corner" <> ToString[i], {i, n}], ";"];
+    writes = StringRiffle[Table[
+      "output[[row," <> ToString[2 i - 1] <> "]]=scale" <> ToString[i] <>
+        " value" <> ToString[i] <> ";output[[row," <> ToString[2 i] <>
+        "]]=valid" <> ToString[i], {i, n}], ";"];
+    source = "Compile[{{lAxis,_Real,1},{gAxis,_Real,1},{dAxis,_Real,1}," <>
+      "{sAxis,_Real,1}," <> decls <>
+      ",{combinations,_Real,2},{vgs,_Real,1}},Module[" <>
+      "{nk=Length[combinations],ng=Length[vgs],output,p,q,row,il,ig,id,is," <>
+      "a,b,c,d,l,g,vd,vs,wl,wg,wd,ws,weight," <> locals <> "}," <>
+      "output=Table[0.,{nk ng},{" <> ToString[2 n] <> "}];" <>
+      "For[p=1,p<=nk,p++,l=combinations[[p,1]];vd=combinations[[p,2]];" <>
+      "vs=combinations[[p,3]];il=1;While[il<Length[lAxis]-1&&lAxis[[il+1]]<=l,il++];" <>
+      "il=Min[il,Length[lAxis]-1];" <>
+      "id=1;While[id<Length[dAxis]-1&&dAxis[[id+1]]<=vd,id++];" <>
+      "id=Min[id,Length[dAxis]-1];" <>
+      "is=1;While[is<Length[sAxis]-1&&sAxis[[is+1]]<=vs,is++];" <>
+      "is=Min[is,Length[sAxis]-1];" <>
+      "wl=(l-lAxis[[il]])/(lAxis[[il+1]]-lAxis[[il]]);" <>
+      "wd=(vd-dAxis[[id]])/(dAxis[[id+1]]-dAxis[[id]]);" <>
+      "ws=(vs-sAxis[[is]])/(sAxis[[is+1]]-sAxis[[is]]);" <>
+      "For[q=1,q<=ng,q++,g=vgs[[q]];ig=1;While[ig<Length[gAxis]-1&&gAxis[[ig+1]]<=g,ig++];" <>
+      "ig=Min[ig,Length[gAxis]-1];" <>
+      "wg=(g-gAxis[[ig]])/(gAxis[[ig+1]]-gAxis[[ig]]);" <> init <> ";" <>
+      "For[a=0,a<=1,a++,For[b=0,b<=1,b++,For[c=0,c<=1,c++,For[d=0,d<=1,d++," <>
+      "weight=If[a==0,1.-wl,wl] If[b==0,1.-wg,wg] If[c==0,1.-wd,wd] " <>
+      "If[d==0,1.-ws,ws];" <> updates <> "]]]];" <>
+      "row=(p-1)ng+q;" <> writes <> "];];output],RuntimeOptions->\"Speed\"]";
+    ToExpression[source]
+  ];
+
+n40CompiledVGSBatchValues[data_Association, names_List, combinations_List,
+    vgs_List] := Module[{inputs, axes, packedCombinations, packedVgs, raw,
+    ng, n},
+  n = Length[names];
+  If[names == {} || combinations == {} || vgs == {}, Return[{}]];
+  inputs = n40CompiledInputs[data, #] & /@ names;
+  If[MemberQ[inputs, $Failed], Return[$Failed]];
+  axes = data /@ {"L", "VGS", "VDS", "VSB"};
+  If[!And @@ (n40PackedRealArrayQ[#, 1] & /@ axes), Return[$Failed]];
+  packedCombinations = Developer`ToPackedArray[N[combinations]];
+  packedVgs = Developer`ToPackedArray[N[vgs]];
+  If[!n40PackedRealArrayQ[packedCombinations, 2] ||
+      !n40PackedRealArrayQ[packedVgs, 1], Return[$Failed]];
+  raw = n40CompiledVGSBatchKernel[n, inputs[[All, 3]]][Sequence @@ axes,
+    Sequence @@ Flatten[inputs, 1], packedCombinations, packedVgs];
+  ng = Length[vgs];
+  Table[Partition[MapThread[If[#2 == 1., #1, Indeterminate] &,
+      {raw[[All, 2 i - 1]], raw[[All, 2 i]]}], ng], {i, n}]
 ];
 
 (* Sort and invert each mode-3 curve inside the VM. Output column 2 is a
@@ -539,25 +602,6 @@ n40DirectLookupScalarVector[data_Association, outvar_String, l_, vgs_List,
   MapThread[If[#2, #1, Indeterminate] &, {result, valid}]
 ];
 
-(* Prepare one scalar-bias VGS sweep and evaluate two variables together. *)
-n40DirectLookupScalarPair[data_Association, name1_String, name2_String, l_,
-    vgs_List, vds_, vsb_] := Module[
-  {axes, bl, bd, bs, valid, safeVgs, pair},
-  axes = data /@ {"L", "VGS", "VDS", "VSB"};
-  bl = n40Bracket[axes[[1]], l];
-  bd = n40Bracket[axes[[3]], vds];
-  bs = n40Bracket[axes[[4]], vsb];
-  If[MemberQ[{bl, bd, bs}, $Failed],
-    Return[ConstantArray[Indeterminate, {2, Length[vgs]}]]];
-  valid = NumericQ[#] && First[axes[[2]]] <= # <= Last[axes[[2]]] & /@ vgs;
-  safeVgs = MapThread[If[#2, #1, First[axes[[2]]]] &, {vgs, valid}];
-  pair = n40CompiledPairValues[data, name1, name2,
-    Transpose[{ConstantArray[l, Length[vgs]], safeVgs,
-      ConstantArray[vds, Length[vgs]], ConstantArray[vsb, Length[vgs]]}]];
-  If[pair === $Failed, Return[$Failed]];
-  Map[MapThread[If[#2, #1, Indeterminate] &, {#, valid}] &, pair]
-];
-
 (* Evaluate every bias combination and VGS point in one compiled call. The
    returned pair contains two matrices with one VGS sweep per row. *)
 n40DirectLookupPairBatch[data_Association, name1_String, name2_String,
@@ -628,6 +672,54 @@ n40DirectLookupPointVectors[data_Association, outvar_String, l_, vgs_List,
   MapThread[If[#2, #1, Indeterminate] &, {result, valid}]
 ];
 
+(* Generate only one contiguous slice of Tuples. The last coordinate varies
+   fastest, matching Tuples and the public result dimensions. *)
+n40CartesianChunkPoints[query_List, start_Integer, count_Integer] := Module[
+  {dims = Length /@ query, strides, rank, index, k},
+  rank = Length[query];
+  strides = Table[
+    If[j == rank, 1, Times @@ Take[dims, {j + 1, rank}]],
+    {j, rank}];
+  Table[
+    index = Mod[Quotient[k, #1], #2] + 1 & @@@ Transpose[{strides, dims}];
+    MapThread[#1[[#2]] &, {query, index}],
+    {k, start, start + count - 1}]
+];
+
+(* Evaluate a Cartesian query through the compiled point kernel without
+   materializing all points or a full derived ratio array. *)
+n40CompiledCartesianSlice[data_Association, outvar_String, query_List,
+    start_Integer, count_Integer] := Module[
+  {axes, axisStarts, points, valid, safePoints, chunk},
+  If[count <= 0, Return[{}]];
+  axes = data /@ {"L", "VGS", "VDS", "VSB"};
+  axisStarts = First /@ axes;
+  points = n40CartesianChunkPoints[query, start, count];
+  valid = Function[point, And @@ MapThread[
+      NumericQ[#2] && First[#1] <= #2 <= Last[#1] &, {axes, point}]] /@
+    points;
+  safePoints = MapThread[If[#2, #1, axisStarts] &, {points, valid}];
+  chunk = n40CompiledValues[data, outvar, safePoints];
+  If[chunk === $Failed, Return[$Failed]];
+  MapThread[If[#2, #1, Indeterminate] &, {chunk, valid}]
+];
+
+n40CompiledCartesianLookup[data_Association, outvar_String, query_List] :=
+ Module[{dims, total, chunkSize, start, count, values},
+  dims = Length /@ query;
+  If[!And @@ (# > 0 & /@ dims), Return[{}]];
+  total = Times @@ dims;
+  chunkSize = Max[1, n40CartesianChunkSize];
+  values = Reap[
+      For[start = 0, start < total, start += chunkSize,
+       count = Min[chunkSize, total - start];
+       values = n40CompiledCartesianSlice[data, outvar, query, start, count];
+       If[values === $Failed, Return[$Failed]];
+       Sow[values];
+      ]][[2]];
+   If[values === {}, {}, Join @@ First[values]]
+  ];
+
 n40DirectLookup[data_Association, outvar_String, params_Association] := Module[
   {axes, query, arr, dims, values},
   axes = {data["L"], data["VGS"], data["VDS"], data["VSB"]};
@@ -639,11 +731,49 @@ n40DirectLookup[data_Association, outvar_String, params_Association] := Module[
       query[[2]], First[query[[3]]], First[query[[4]]]];
     If[values === $Failed, Return[$Failed]];
     Return[n40Squeeze[ArrayReshape[values, dims]]]];
+  values = n40CompiledCartesianLookup[data, outvar, query];
+  If[values =!= $Failed,
+    Return[n40Squeeze[ArrayReshape[values, dims]]]];
   arr = n40Array[data, outvar];
   If[arr === $Failed, Return[$Failed]];
   values = n40LinearValue[axes, arr, #] & /@ Tuples[query];
   n40Squeeze[ArrayReshape[values, dims]]
 ];
+
+n40DirectLookupMulti[data_Association, outvars_List, params_Association] :=
+ Module[{axes, query, dims, total, chunkSize, start, count, points, valid,
+   safePoints, chunkValues, values, arrays, inputs, names},
+  axes = data /@ {"L", "VGS", "VDS", "VSB"};
+  query = Flatten[{Lookup[params, #]}] & /@ {"L", "VGS", "VDS", "VSB"};
+  dims = Length /@ query;
+  total = Times @@ dims;
+  chunkSize = Max[1, n40CartesianChunkSize];
+  names = ToUpperCase /@ outvars;
+  inputs = n40CompiledInputs[data, #] & /@ names;
+  If[MemberQ[inputs, $Failed], inputs = $Failed];
+  values = ConstantArray[{}, Length[outvars]];
+  For[start = 0, start < total, start += chunkSize,
+    count = Min[chunkSize, total - start];
+    points = n40CartesianChunkPoints[query, start, count];
+    valid = Function[point, And @@ MapThread[
+        NumericQ[#2] && First[#1] <= #2 <= Last[#1] &, {axes, point}]] /@
+      points;
+    safePoints = MapThread[If[#2, N[#1], First /@ axes] &,
+      {points, valid}];
+    chunkValues = If[inputs === $Failed, $Failed,
+      n40CompiledMultiValuesPrepared[data, names, safePoints, inputs]];
+    If[chunkValues === $Failed, Break[]];
+    chunkValues = MapThread[If[#2, #1, Indeterminate] &, {#, valid}] & /@
+      chunkValues;
+    values = MapThread[Join, {values, chunkValues}]
+  ];
+  If[Total[Length /@ values] == 0 ||
+      !And @@ (Length[#] == total & /@ values),
+    arrays = n40DirectLookup[data, #, params] & /@ outvars;
+    If[MemberQ[arrays, $Failed], Return[$Failed]];
+    Return[arrays]];
+  Return[n40Squeeze /@ (ArrayReshape[#, dims] & /@ values)];
+ ];
 
 n40PchipEndpoint[h1_, h2_, delta1_, delta2_] := Module[{slope},
   slope = ((2*h1 + h2)*delta1 - h1*delta2)/(h1 + h2);
@@ -795,14 +925,29 @@ n40MappedLookup[data_Association, outvar_String, args_List,
   If[warning == "on" && !FreeQ[rows, Indeterminate],
     Print["lookup warning: ", inputVar,
       " input out of range (Indeterminate returned)."]];
-  rows
+ rows
+ ];
+
+(* A mapped output-variable dimension can be folded into one multi-output
+   lookup when the remaining arguments are shared. This preserves Map's
+   result order while allowing the N-output kernel to run once. *)
+n40MappedLookupOutputList[data_Association, outvars_List, args_List,
+    threadCount_Integer] := Module[{expression, result},
+  If[!And @@ (StringQ /@ outvars) || Length[outvars] =!= threadCount,
+    Return[$Failed]];
+  If[FreeQ[args, n40Threaded], Return[lookup[data, outvars, Sequence @@ args]]];
+  expression = HoldComplete[lookup[data, outvar, Sequence @@ args]];
+  result = Table[
+    ReleaseHold[expression /. n40Threaded[value_] :> value[[t]]],
+    {t, threadCount}];
+  result
 ];
 
 n40MappedLookupVGS[data_Association, args_List, threadCount_Integer] := Module[
   {params, parameterRows, method, warning, targetVar, targetRows, lRows,
-   vdsRows, vsbRows, combinationsByThread, counts, allCombinations, pair,
-   starts, allTargetRows, allResults, rows, result, dimensions,
-   vgs = data["VGS"], t},
+    vdsRows, vsbRows, combinationsByThread, counts, allCombinations,
+    starts, allTargetRows, allResults, rows, result, dimensions,
+    t},
   params = n40ParseArgs[args];
   If[params === $Failed || !And @@ (FreeQ[#, n40Threaded] ||
         Head[#] === n40Threaded & /@ Values[params]), Return[$Failed]];
@@ -816,7 +961,7 @@ n40MappedLookupVGS[data_Association, args_List, threadCount_Integer] := Module[
   If[!SameQ @@ (ToString[Lookup[#, "METHOD", "pchip"]] & /@ parameterRows) ||
       !SameQ @@ (ToLowerCase[ToString[Lookup[#, "WARNING", "off"]]] & /@
         parameterRows), Return[$Failed]];
-  targetRows = Flatten[{#[targetVar]}] & /@ parameterRows;
+    targetRows = Flatten[{#[targetVar]}] & /@ parameterRows;
   lRows = Flatten[{Lookup[#, "L", Min[data["L"]]]}] & /@ parameterRows;
   vdsRows = Flatten[{Lookup[#, "VDS", Max[data["VDS"]]/2]}] & /@ parameterRows;
   vsbRows = Flatten[{Lookup[#, "VSB", 0.]}] & /@ parameterRows;
@@ -824,13 +969,10 @@ n40MappedLookupVGS[data_Association, args_List, threadCount_Integer] := Module[
     {lRows, vdsRows, vsbRows}];
   counts = Length /@ combinationsByThread;
   allCombinations = Flatten[combinationsByThread, 1];
-  pair = n40DirectLookupPairBatch[data, targetVar, targetVar,
-    allCombinations, vgs];
-  If[pair === $Failed, Return[$Failed]];
-  starts = Most[FoldList[Plus, 1, counts]];
-  allTargetRows = Flatten[MapThread[ConstantArray, {targetRows, counts}], 1];
-  allResults = n40CurveLookupBatch[pair[[1]],
-    ConstantArray[vgs, Total[counts]], allTargetRows, targetVar, method];
+   starts = Most[FoldList[Plus, 1, counts]];
+   allTargetRows = Flatten[MapThread[ConstantArray, {targetRows, counts}], 1];
+   allResults = n40DirectLookupVGSBatch[data, targetVar, allCombinations,
+     allTargetRows, method];
   If[allResults === $Failed, Return[$Failed]];
   allResults = MapThread[Take[allResults, {#1, #1 + #2 - 1}] &,
     {starts, counts}];
@@ -854,6 +996,11 @@ n40MappedFallback[body_HoldComplete, lists_List] := Module[{n, function},
 n40MappedHeldCall[
     HoldComplete[lookup[data_, outvar_String, args___]], threadCount_Integer] :=
   n40MappedLookup[data, outvar, {args}, threadCount];
+
+n40MappedHeldCall[
+    HoldComplete[lookup[data_, outvar_n40Threaded, args___]],
+    threadCount_Integer] :=
+  n40MappedLookupOutputList[data, outvar[[1]], {args}, threadCount];
 
 n40MappedHeldCall[
     HoldComplete[lookupVGS[data_, args___]], threadCount_Integer] :=
@@ -950,8 +1097,41 @@ lookup[data_Association, outvar_String, args___] := Module[
       Length[vsb], Length[targets]}]];
   If[warning == "on" && !FreeQ[result, Indeterminate],
     Print["lookup warning: ", inputVar, " input out of range (Indeterminate returned)."]];
-  result
-];
+ result
+ ];
+
+(* Multi-output lookup. Mode 3 samples the input ratio and all requested
+   output ratios on the same VGS curves before the final 1-D inversion. *)
+lookup[data_Association, outvars_List, args___] /;
+    And @@ (StringQ /@ outvars) := Module[
+  {params, defaults, nonCoordinates, inputVar, targets, l, vds, vsb, vgs,
+   combinations, rows, method},
+  If[outvars == {}, Return[{}]];
+  params = n40ParseArgs[{args}];
+  If[params === $Failed, Return[$Failed]];
+  defaults = <|"L" -> Min[data["L"]], "VGS" -> data["VGS"],
+    "VDS" -> Max[data["VDS"]]/2, "VSB" -> 0.,
+    "METHOD" -> "pchip", "WARNING" -> "off"|>;
+  params = Join[defaults, params];
+  nonCoordinates = Complement[Keys[params], Keys[defaults]];
+  If[Length[nonCoordinates] == 1,
+    inputVar = First[nonCoordinates];
+    If[!StringContainsQ[inputVar, "_"] ||
+        !And @@ (StringContainsQ[#, "_"] & /@ outvars), Return[$Failed]];
+    targets = Flatten[{params[inputVar]}];
+    l = Flatten[{params["L"]}]; vds = Flatten[{params["VDS"]}];
+    vsb = Flatten[{params["VSB"]}]; vgs = Flatten[{params["VGS"]}];
+    combinations = Tuples[{l, vds, vsb}];
+    method = ToString[params["METHOD"]];
+    rows = n40DirectLookupVGSBatchMulti[data,
+      Prepend[outvars, inputVar], combinations, targets, method, vgs];
+    If[rows === $Failed, Return[$Failed]];
+    Return[n40Squeeze /@ (ArrayReshape[Flatten[#],
+        {Length[l], Length[vds], Length[vsb], Length[targets]}] & /@ rows)]
+  ];
+  If[nonCoordinates =!= {}, Return[$Failed]];
+  n40DirectLookupMulti[data, outvars, params]
+ ];
 
 n40LookupVGSOne[data_Association, targetVar_String, targets_List, l_, vds_, vsb_, method_] :=
   Module[{x, vgs = data["VGS"]},
@@ -960,10 +1140,77 @@ n40LookupVGSOne[data_Association, targetVar_String, targets_List, l_, vds_, vsb_
     n40CurveLookup[x, vgs, targets, targetVar, method]
   ];
 
+(* Evaluate all ordinary lookupVGS bias combinations in one compiled call.
+   VGS varies fastest so each returned row is one curve. *)
+n40DirectLookupVGSBatch[data_Association, targetVar_String, combinations_List,
+    targets_List, method_String] := Module[
+  {axes, vgs, combinationValid, safeCombinations, rows, targetRows, result,
+   ng},
+  If[combinations == {} || targets == {}, Return[{}]];
+  axes = data /@ {"L", "VGS", "VDS", "VSB"};
+  vgs = axes[[2]];
+  ng = Length[vgs];
+  combinationValid = Function[c,
+      Length[c] == 3 && And @@ MapThread[
+        NumericQ[#2] && First[#1] <= #2 <= Last[#1] &,
+        {axes[[{1, 3, 4}]], c}]] /@ combinations;
+  safeCombinations = MapThread[
+    If[#2, N[#1], First /@ axes[[{1, 3, 4}]]] &,
+    {combinations, combinationValid}];
+  rows = n40CompiledVGSBatchValues[data, {targetVar}, safeCombinations, vgs];
+  If[rows === $Failed, Return[$Failed]];
+  rows = First[rows];
+  rows = MapThread[
+    If[#2, #1, ConstantArray[Indeterminate, ng]] &,
+    {rows, combinationValid}];
+  targetRows = If[ArrayDepth[targets] == 2, targets,
+    ConstantArray[targets, Length[rows]]];
+  If[Length[targetRows] =!= Length[rows] ||
+      !SameQ @@ (Length /@ targetRows), Return[$Failed]];
+  result = If[ToLowerCase[method] == "pchip",
+    n40CurveLookupBatch[rows, ConstantArray[vgs, Length[rows]],
+      targetRows, targetVar, method],
+    MapThread[n40CurveLookup[#1, vgs, #2, targetVar, method] &,
+      {rows, targetRows}]];
+  If[result === $Failed, Return[$Failed]];
+ result
+ ];
+
+(* Sample several variables on the same VGS curves. The first variable is the
+   reverse-lookup input; all requested outputs reuse its recovered VGS. *)
+n40DirectLookupVGSBatchMulti[data_Association, names_List, combinations_List,
+    targets_List, method_String, vgs_List] := Module[
+  {rows, targetRows, inputRows, outputRows, result, pair, q},
+  If[names == {} || combinations == {} || targets == {}, Return[{}]];
+  rows = n40CompiledVGSBatchValues[data, names, combinations, vgs];
+  If[rows === $Failed,
+    rows = {};
+    Do[
+      pair = n40DirectLookupPairBatch[data, names[[q]],
+        names[[Min[q + 1, Length[names]]]], combinations, vgs];
+      If[pair === $Failed, Return[$Failed]];
+      rows = Join[rows, If[q + 1 <= Length[names], pair, {pair[[1]]}]],
+      {q, 1, Length[names], 2}]
+  ];
+  targetRows = If[ArrayDepth[targets] == 2, targets,
+    ConstantArray[targets, Length[rows[[1]]]]];
+  If[Length[targetRows] =!= Length[rows[[1]]] ||
+      !SameQ @@ (Length /@ targetRows), Return[$Failed]];
+  inputRows = rows[[1]];
+  outputRows = Rest[rows];
+  result = Map[
+    If[ToLowerCase[method] == "pchip",
+      n40CurveLookupBatch[inputRows, #, targetRows, First[names], method] &,
+      MapThread[n40CurveLookup[#1, #2, #3, First[names], method] &,
+        {inputRows, #, targetRows}] &], outputRows];
+  If[MemberQ[result, $Failed], Return[$Failed]];
+  result
+ ];
+
 lookupVGS[data_Association, args___] := Module[
   {params, method, warning, targetVar, targets, l, vds, vsb, vdb, vgb, rows,
-   sourceBias, vgsSearch, vdsSearch, x, valid, combinations, vectorCount,
-   result, step},
+    sourceBias, vgsSearch, vdsSearch, x, valid, combinations, result, step,
+    dimensions},
   params = n40ParseArgs[{args}];
   If[params === $Failed, Return[$Failed]];
   method = ToString[Lookup[params, "METHOD", "pchip"]];
@@ -995,13 +1242,13 @@ lookupVGS[data_Association, args___] := Module[
 
   vds = Flatten[{Lookup[params, "VDS", Max[data["VDS"]]/2]}];
   vsb = Flatten[{Lookup[params, "VSB", 0.]}];
-  vectorCount = Count[{Length[targets], Length[l], Length[vds], Length[vsb]},
-    n_ /; n > 1];
-  If[vectorCount > 1, Return[$Failed]];
   combinations = Tuples[{l, vds, vsb}];
-  rows = n40LookupVGSOne[data, targetVar, targets, #[[1]], #[[2]], #[[3]],
-      method] & /@ combinations;
-  result = n40Squeeze[rows];
+  rows = n40DirectLookupVGSBatch[data, targetVar, combinations, targets, method];
+  If[rows === $Failed,
+    rows = n40LookupVGSOne[data, targetVar, targets, #[[1]], #[[2]], #[[3]],
+        method] & /@ combinations];
+  dimensions = {Length[l], Length[vds], Length[vsb], Length[targets]};
+  result = n40Squeeze[ArrayReshape[Flatten[rows], dimensions]];
   If[warning == "on" && targetVar == "GM_ID" && !FreeQ[result, Indeterminate],
     Print["lookupVGS: GM_ID input larger than maximum!"]];
   result

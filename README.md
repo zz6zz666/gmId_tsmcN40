@@ -144,14 +144,25 @@ gmId = lookup[data, "GM_ID", "VGS", 0.6, "VDS", 0.7, "VSB", 0, "L", 0.1];
 vgs = lookupVGS[data, "GM_ID", 15, "VDS", 0.7, "VSB", 0, "L", 0.1];
 wt = lookup[data, "GM_CGG", "GM_ID", {5, 10, 15}, "VDS", 0.7, "L", 0.1];
 
+(* 正查一次获取多个变量；返回值顺序与变量名列表一致 *)
+{intrinsicGain, idPerWidth} = lookup[data, {"GM_GDS", "ID_W"},
+  "L", {0.04, 0.06}, "VGS", {0.6, 0.7}, "VDS", 0.7, "VSB", 0.];
+
+(* lookupVGS 也支持普通 mode 1 的多维 Cartesian 输入 *)
+vgs = lookupVGS[data, "GM_ID", {10., 12., 15.},
+  "L", {0.04, 0.06}, "VDS", {0.5, 0.7}, "VSB", 0.];
+Dimensions[vgs]                         (* {2, 2, 3} *)
+
 (* MapThread 参数按位置配对；原生 VDS 列表仍是笛卡尔维度 *)
-gain = lookup[data, "GM_GDS", "GM_ID", #1, "L", #2,
-    "VDS", {0.5, 0.7, 0.9}, "VSB", 0] & ~MapThread~
-  {{8, 10, 12}, {0.04, 0.06, 0.08}};
+gain = MapThread[
+  lookup[data, "GM_GDS", "GM_ID", #1, "L", #2,
+    "VDS", {0.5, 0.7, 0.9}, "VSB", 0.] &,
+  {{8, 10, 12}, {0.04, 0.06, 0.08}}];
 Dimensions[gain]                         (* {3, 3} = 配对维度 × VDS维度 *)
 ```
 
-- `lookup`、`lookupVGS` 的函数划分、交替名称/值参数及默认值与附录和 Python API 对齐。
+- `lookup`、`lookupVGS` 的函数划分、交替名称/值参数及默认值与附录和 Python API 对齐；
+  Mathematica 版本额外提供多输出和多维批量扩展。
 - 加载查表文件后，函数体直接为 `lookup` 或 `lookupVGS` 的 `/@` 与 `MapThread`
   会自动合并为分块批量查询。`MapThread` 中的列表按位置配对，函数体内直接传给查表函数的
   普通列表仍形成笛卡尔积；其他 Mathematica 函数的 `Map`/`MapThread` 行为不变。
