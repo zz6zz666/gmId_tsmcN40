@@ -129,9 +129,8 @@ lookup[data, "GM_CGG", "GM_ID", {8., 10., 12.},
   "L", .04, "VDS", .7, "VSB", 0.]
 ```
 
-The final one-dimensional interpolation defaults to `"pchip"`. It can be
-changed to `"linear"` or another Mathematica interpolation order such as
-`"cubic"`:
+The final one-dimensional interpolation defaults to `"pchip"`. The accepted
+methods are `"pchip"`, `"linear"`, and `"cubic"`:
 
 ```wl
 lookup[data, "GM_CGG", "GM_ID", {8., 10., 12.},
@@ -205,17 +204,21 @@ lookupVGS[data, "GM_ID", 10.,
   "VDB", .6, "VGB", 1., "L", .04]
 ```
 
-The mode 5 path currently accepts scalar `VDB`, `VGB`, and `L`, while the
-inversion target may be a vector:
+The mode 5 call accepts scalar `VDB`, `VGB`, and `L`, while the inversion target
+may be a vector:
 
 ```wl
 lookupVGS[data, "GM_ID", {10., 12., 15.},
   "VDB", .6, "VGB", 1., "L", .04]
 ```
 
-Mode 5 has a different path geometry from mode 4 and therefore uses a separate
-vector sampler. It is not combined with the ordinary fixed-source Cartesian
-batch kernel.
+Mode 5 has a different path geometry from mode 4 and uses a separate path
+sampler. It is not combined with the ordinary fixed-source Cartesian batch
+kernel. Independent mode 5 paths used through `Map` or `MapThread` are sampled
+in one point batch.
+
+The source-bias path sampling step is derived from the first two `VGS` axis
+entries.
 
 ## Vector Inputs And Output Dimensions
 
@@ -290,7 +293,7 @@ result = MapThread[
     {{.5, .7}, {.6, .8}}
   }
 ];
-Dimensions[result]                         (* {{2,2,2}, {2,2,2}} *)
+Dimensions[result]                         (* {2, 2, 2, 2} *)
 ```
 
 `result[[1]]` is the first paired item and `result[[2]]` is the second. Each
@@ -317,6 +320,16 @@ For `lookupVGS`, the same pattern batches independent VGS recovery calls:
 ```wl
 lookupVGS[data, "GM_ID", 15., "L", #, "VDS", .7, "VSB", 0.] & /@
   {.04, .06, .08}
+```
+
+Unknown-source paths are batched as separate path rows:
+
+```wl
+MapThread[
+  lookupVGS[data, "GM_ID", {10., 12.},
+    "VDB", #1, "VGB", #2, "L", #3] &,
+  {{.6, .7}, {1., 1.05}, {.04, .06}}
+]
 ```
 
 ### MapThread By Position
@@ -385,7 +398,8 @@ back to ordinary element-by-element evaluation.
 f = N40Interpolant[data, "GM_ID"];
 ```
 
-`SliceVGS` returns samples for plotting or custom analysis:
+`SliceVGS` returns `{VGS,value}` samples for plotting or custom analysis. It
+uses the same four-dimensional linear lookup as mode 1:
 
 ```wl
 curve = SliceVGS[data, "GM_ID", .04, .7, 0.];

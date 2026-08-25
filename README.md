@@ -153,6 +153,9 @@ vgs = lookupVGS[data, "GM_ID", {10., 12., 15.},
   "L", {0.04, 0.06}, "VDS", {0.5, 0.7}, "VSB", 0.];
 Dimensions[vgs]                         (* {2, 2, 3} *)
 
+vgsUnknownSource = lookupVGS[data, "GM_ID", {10., 12., 15.},
+  "VDB", .6, "VGB", 1., "L", .04];
+
 (* MapThread 参数按位置配对；原生 VDS 列表仍是笛卡尔维度 *)
 gain = MapThread[
   lookup[data, "GM_GDS", "GM_ID", #1, "L", #2,
@@ -163,16 +166,18 @@ Dimensions[gain]                         (* {3, 3} = 配对维度 × VDS维度 *
 
 - `lookup`、`lookupVGS` 的函数划分、交替名称/值参数及默认值与附录和 Python API 对齐；
   Mathematica 版本额外提供多输出和多维批量扩展。
+- `METHOD` 的有效值为 `"pchip"`、`"linear"` 和 `"cubic"`；多维表插值固定为线性。
 - 加载查表文件后，函数体直接为 `lookup` 或 `lookupVGS` 的 `/@` 与 `MapThread`
   会自动合并为分块批量查询。`MapThread` 中的列表按位置配对，函数体内直接传给查表函数的
   普通列表仍形成笛卡尔积；其他 Mathematica 函数的 `Map`/`MapThread` 行为不变。
 - 可用 `DisableTsmcN40MapOptimization[]` 禁用上述系统规则，并用
   `EnableTsmcN40MapOptimization[]` 再次启用。复杂 Slot 表达式或不支持的查表模式自动回退到逐项求值。
 - `XTRACT`、`XTRACT2` 位于 `mathematica/ekv_extract.wl`，保持附录中的位置参数接口。
-- 附录缺省值为：`lookup` 使用最小 `L`、完整 `VGS`、`VDD/2` 和 `VSB=0`；
+- 附录缺省值为：`lookup` 使用最小 `L`、完整 `VGS`、最大 `VDS/2` 和 `VSB=0`；
   `lookupVGS` 另使用 PCHIP；`XTRACT/XTRACT2` 使用 `rho=0.6` 和 300 K。
 - `XTRACT2` 缺省直接使用总电流并返回 `IS`。显式提供扩展宽度参数时才返回 `JS=IS/W`。
-- `N40Interpolant`、`SliceVGS` 保留为需要直接操作插值函数时使用的底层接口。
+- `N40Interpolant` 提供可复用的四维线性插值函数；`SliceVGS` 返回固定
+  `{L,VDS,VSB}` 下的 `{VGS,value}` 样本。
 - 验证：`wolframscript -script mathematica/xtract_demo.wl`（读取真实 .h5，
   打印与 Python `lookup` 一致的插值结果）。
 
